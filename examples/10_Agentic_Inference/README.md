@@ -193,10 +193,13 @@ Every submitted Pareto point must satisfy all of the following accuracy threshol
 | ------------------ | ---------------: | ---------------: |
 | Inline accuracy    |      `>= 63.08%` |      `>= 55.86%` |
 | OSL per-turn mean  | `404-494` tokens | `355-434` tokens |
-| SWE-bench accuracy |       `>= 76.5%` |       `>= 67.0%` |
+| SWE-bench accuracy |       `>= 76.5%` |       `>= 67.5%` |
 
 ### Speculative Decoding
 
 Speculative decoding may be used in accordance with the MLPerf Endpoint Benchmark rules. The list of allowed speculative-decoding heads for this benchmark will be maintained below. Only heads included in this list may be used for official submissions.
 
-Allowed speculative-decoding heads: _None currently listed._
+Allowed speculative-decoding heads:
+
+- Qwen3.6-35B-A3B: native MTP head included with the model
+- Kimi K2.6: `nvidia/Kimi-K2.6-Eagle3`
