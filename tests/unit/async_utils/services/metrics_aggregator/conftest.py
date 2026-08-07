@@ -87,6 +87,23 @@ class MockBatchTokenizer:
         combined = (content or "") + " " + (reasoning or "") + " " + tool_calls_str
         return len(combined.split())
 
+    async def token_count_prompt_async(
+        self,
+        messages: tuple[dict, ...],
+        tools: tuple[dict, ...] | None,
+        _loop: asyncio.AbstractEventLoop,
+    ) -> int:
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        parts = [
+            str(message.get(key, ""))
+            for message in messages
+            for key in ("content", "reasoning_content", "tool_calls")
+            if message.get(key)
+        ]
+        parts.extend(str(tool) for tool in tools or ())
+        return len(" ".join(parts).split())
+
     def close(self) -> None:
         pass
 

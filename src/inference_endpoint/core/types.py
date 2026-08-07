@@ -284,17 +284,22 @@ class PromptData(
 ):  # type: ignore[call-arg]
     """Prompt input data attached to ISSUED events for ISL computation.
 
-    Exactly one of ``text`` or ``token_ids`` should be set:
+    Exactly one of ``text``, ``token_ids``, or ``messages`` should be set:
     - ``text``: raw prompt string (OpenAI path) — requires tokenization for ISL.
     - ``token_ids``: pre-tokenized token ID list (SGLang/Harmonize path) — ISL is len().
+    - ``messages``: structured chat history rendered with the model's template.
 
     Attributes:
         text: Raw prompt string. Set when the adapter sends text prompts.
         token_ids: Pre-computed token IDs. Set when the adapter pre-tokenizes (e.g. SGLang).
+        messages: Structured messages sent to a chat-completions endpoint.
+        tools: Tool declarations accompanying ``messages``.
     """
 
     text: str | None = None
     token_ids: tuple[int, ...] | None = None
+    messages: tuple[dict[str, Any], ...] | None = None
+    tools: tuple[dict[str, Any], ...] | None = None
 
 
 class ErrorData(

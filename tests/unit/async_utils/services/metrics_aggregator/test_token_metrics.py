@@ -139,7 +139,7 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
     """Tokenizer that supports apply_chat_template for tool-call testing."""
 
     def apply_chat_template(
-        self, messages, tokenize=False, add_generation_prompt=False
+        self, messages, tools=None, tokenize=False, add_generation_prompt=False
     ):
         # Simulate 2 wrapper tokens for the template frame.
         parts = ["WRAPPER", "WRAPPER"]
@@ -153,6 +153,10 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
                 import msgspec
 
                 parts.append(msgspec.json.encode(msg["tool_calls"]).decode())
+        if tools:
+            parts.extend(tool["function"]["name"] for tool in tools)
+        if add_generation_prompt:
+            parts.append("GENERATION")
         rendered = " ".join(parts)
         if tokenize:
             return list(range(len(rendered.split())))
@@ -161,6 +165,41 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
 
 @pytest.mark.unit
 class TestBatchTokenizerMessageTokenization:
+    @pytest.mark.asyncio
+    async def test_token_count_prompt_preserves_messages_tools_and_generation_prompt(
+        self,
+    ):
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                messages = (
+                    {"role": "user", "content": "question"},
+                    {
+                        "role": "assistant",
+                        "reasoning_content": "reasoning",
+                        "content": None,
+                        "tool_calls": (
+                            {
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            },
+                        ),
+                    },
+                    {"role": "tool", "content": "result"},
+                )
+                tools = (
+                    {
+                        "type": "function",
+                        "function": {"name": "lookup", "parameters": {}},
+                    },
+                )
+
+                count = await tok.token_count_prompt_async(messages, tools, loop)
+
+                # Wrapper + question + reasoning + tool call + tool result +
+                # declared tool + generation prompt.
+                assert count == 8
+
     @pytest.mark.asyncio
     async def test_token_count_message_subtracts_baseline(self):
         """token_count_message_async returns full_tokens - baseline."""
@@ -236,6 +275,31 @@ class _SlowBackend:
         return [_Encoding(len(t.split())) for t in texts]
 
 
+class Encoding:
+    """Stand-in that fails if code bypasses the tokenizer wrapper."""
+
+    __module__ = "tiktoken.core"
+
+    def encode(self, *args, **kwargs):
+        raise AssertionError("raw tiktoken encode must not be called")
+
+    def encode_batch(self, *args, **kwargs):
+        raise AssertionError("raw tiktoken encode_batch must not be called")
+
+
+class _FakeTokenizerWithTikTokenModel(_FakeTokenizer):
+    """Kimi-shaped custom tokenizer backed by the Rust tiktoken core."""
+
+    def __init__(self, load_delay: float = 0.0):
+        super().__init__(load_delay)
+        self.model = Encoding()
+        self.encode_calls: list[tuple[str, bool]] = []
+
+    def encode(self, text, *, add_special_tokens=False):
+        self.encode_calls.append((text, add_special_tokens))
+        return text.split()
+
+
 @pytest.mark.unit
 class TestEncodeHelpers:
     def test_encode_lengths_prefers_fast(self):
@@ -262,6 +326,41 @@ class TestEncodeHelpers:
         assert token_metrics_module.load_reference_backend("m") == "BACKEND"
         assert captured["name"] == "m"
         assert captured["kwargs"].get("trust_remote_code") is True
+
+    def test_load_reference_backend_uses_kimi_python_wrapper(self, monkeypatch):
+        """Kimi counting must not bypass its Python tokenizer wrapper."""
+
+        class _FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name, **kwargs):
+                assert name == "kimi"
+                assert kwargs == {"trust_remote_code": True}
+                return _FakeTokenizerWithTikTokenModel()
+
+        monkeypatch.setattr(token_metrics_module, "AutoTokenizer", _FakeAutoTokenizer)
+        backend = token_metrics_module.load_reference_backend("kimi")
+        assert backend is not None
+        assert encode_lengths(backend, ["a b", "c"]) == [2, 1]
+        assert backend.tokenizer.encode_calls == [("a b", False), ("c", False)]
+
+    def test_load_reference_backend_rejects_tiktoken_lookalike(self, monkeypatch):
+        class _LookalikeEncoding:
+            def encode(self, text, *, allowed_special):
+                return text.split()
+
+            def encode_batch(self, texts, *, allowed_special):
+                return [text.split() for text in texts]
+
+        class _FakeTok:
+            model = _LookalikeEncoding()
+
+        class _FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name, **kwargs):
+                return _FakeTok()
+
+        monkeypatch.setattr(token_metrics_module, "AutoTokenizer", _FakeAutoTokenizer)
+        assert token_metrics_module.load_reference_backend("lookalike") is None
 
     def test_worker_encode_lengths_raises_without_backend(self, monkeypatch):
         monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", None)
@@ -342,6 +441,20 @@ class TestSetupShardsDecisions:
         with patch(_MOCK_TARGET, _FakeTokenizer):  # no backend_tokenizer
             with pytest.raises(RuntimeError, match="fast"):
                 BatchTokenizer("fake", live_workers=2)
+
+    def test_tiktoken_wrapper_is_supported_by_process_shards(self, monkeypatch):
+        monkeypatch.setattr(
+            token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
+        )
+        monkeypatch.setattr(
+            token_metrics_module, "cgroup_clamped_cpus", lambda: list(range(16))
+        )
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTikTokenModel):
+            with BatchTokenizer("kimi", live_workers=2) as tok:
+                assert len(tok._procs) == 2
+                assert tok._backend is not None
+                assert tok._backend.tokenizer is tok._tokenizer
+                assert encode_lengths(tok._backend, ["a b", "c"]) == [2, 1]
 
     def test_affinity_unavailable_shards_unpinned(self, monkeypatch):
         """No affinity API (e.g. macOS): shard from the CPU count, unpinned."""
@@ -747,18 +860,18 @@ def test_terminate_procs_kills_running_workers():
         assert future.running(), "worker task did not start"
         procs = list((getattr(ex, "_processes", None) or {}).values())
         assert procs, "worker did not spawn"
-        assert not wait_for_process(
-            [p.sentinel for p in procs], timeout=0
-        ), "worker exited before termination"
+        assert not wait_for_process([p.sentinel for p in procs], timeout=0), (
+            "worker exited before termination"
+        )
 
         _terminate_procs([ex])
 
         for p in procs:
             # The executor manager may reap the child concurrently; sentinel
             # readiness observes exit without racing its return-code update.
-            assert wait_for_process(
-                [p.sentinel], timeout=5
-            ), "worker was not terminated"
+            assert wait_for_process([p.sentinel], timeout=5), (
+                "worker was not terminated"
+            )
     finally:
         cleanup_procs = procs or list((getattr(ex, "_processes", None) or {}).values())
         for p in cleanup_procs:

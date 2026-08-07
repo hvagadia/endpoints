@@ -263,19 +263,23 @@ class PhaseIssuer:
         prompt_data: PromptData
         if isinstance(data, dict):
             token_ids = data.get("input_tokens") or data.get("token_ids")
-            # Multimodal datasets store ``prompt`` as a list of OpenAI content
-            # parts (e.g. [{"type": "text", ...}, {"type": "image_url", ...}])
-            # which the HTTP adapter handles directly. `PromptData.text` is only
-            # meaningful for ISL reporting on text-only prompts.
-            # Therefore, setting `text=None` for non-string prompts
-            # means that ISL reporting will be unavailable for multimodal samples.
-            prompt_text = data.get("prompt")
-            if prompt_text is None and "messages" in data:
-                prompt_text = _extract_prompt_text(data["messages"])
-            prompt_data = PromptData(
-                text=prompt_text if isinstance(prompt_text, str) else None,
-                token_ids=tuple(token_ids) if token_ids is not None else None,
-            )
+            # Prefer the exact representation sent to the endpoint: existing
+            # token IDs, then structured chat messages, then a plain prompt.
+            # Non-string standalone prompts (for example multimodal content
+            # parts) remain unavailable for ISL reporting.
+            if token_ids is not None:
+                prompt_data = PromptData(token_ids=tuple(token_ids))
+            elif isinstance(data.get("messages"), list | tuple):
+                tools = data.get("tools")
+                prompt_data = PromptData(
+                    messages=tuple(data["messages"]),
+                    tools=tuple(tools) if isinstance(tools, list | tuple) else None,
+                )
+            else:
+                prompt_text = data.get("prompt")
+                prompt_data = PromptData(
+                    text=prompt_text if isinstance(prompt_text, str) else None
+                )
         else:
             prompt_data = PromptData()
         self._publisher.publish(

@@ -186,8 +186,8 @@ class TokenTrigger(EmitTrigger):
 
     Subclasses implement ``_extract_text()`` to pull the text to tokenize from
     the event record, and may override ``_extract_message()`` to return
-    (content, reasoning, tool_calls) for chat-template–aware tokenization when
-    tool calls are present. ``fire()`` does not tokenize inline — it enqueues
+    (content, reasoning, tool_calls) for chat-template-aware tokenization of
+    structured output. ``fire()`` does not tokenize inline — it enqueues
     the work plus a recorder callback onto the shared ``TokenBatchQueue``, which
     the aggregator flushes in batches. ``_compute_value()`` can transform the
     token count before it is recorded.
@@ -305,7 +305,7 @@ class SampleLatencyTrigger(TimeDeltaTrigger):
 
 
 class IslTrigger(TokenTrigger):
-    """ISL from PromptData: ``len(token_ids)`` or the tokenized prompt text."""
+    """ISL from token IDs, structured chat messages, or plain prompt text."""
 
     def __init__(
         self,
@@ -318,6 +318,13 @@ class IslTrigger(TokenTrigger):
         # Sync fast path: any backend that pre-populates token_ids (e.g. SGLang).
         if isinstance(ev_rec.data, PromptData) and ev_rec.data.token_ids is not None:
             self.registry.record(self.metric_name, len(ev_rec.data.token_ids))
+            return
+        if isinstance(ev_rec.data, PromptData) and ev_rec.data.messages is not None:
+            if self._queue is not None:
+                self._queue.enqueue_prompt(
+                    (ev_rec.data.messages, ev_rec.data.tools),
+                    self._make_recorder(ev_rec, pre_change),
+                )
             return
         # Text path: tokenize raw prompt text — used when token_ids are
         # unavailable (e.g. OpenAI-compatible endpoints). Enqueued by the base.
@@ -349,7 +356,9 @@ class OslTrigger(TokenTrigger):
         return None
 
     def _extract_message(self, ev_rec, row, pre_change):
-        if isinstance(ev_rec.data, TextModelOutput) and ev_rec.data.tool_calls:
+        if isinstance(ev_rec.data, TextModelOutput) and (
+            ev_rec.data.reasoning or ev_rec.data.tool_calls
+        ):
             return ev_rec.data.as_message_parts()
         return None
 
@@ -391,7 +400,9 @@ class TpotTrigger(TokenTrigger):
     def _extract_message(self, ev_rec, row, pre_change):
         if pre_change.get(SampleField.RECV_FIRST_NS) is None:
             return None
-        if isinstance(ev_rec.data, TextModelOutput) and ev_rec.data.tool_calls:
+        if isinstance(ev_rec.data, TextModelOutput) and (
+            ev_rec.data.reasoning or ev_rec.data.tool_calls
+        ):
             return ev_rec.data.as_message_parts_after_first_chunk()
         return None
 

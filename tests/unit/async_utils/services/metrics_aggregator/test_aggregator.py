@@ -492,9 +492,9 @@ class TestEdgeCases:
                 error_records = [
                     r for r in caplog.records if "Duplicate STARTED" in r.message
                 ]
-                assert (
-                    len(error_records) == 1
-                ), "duplicate STARTED must log exactly one error"
+                assert len(error_records) == 1, (
+                    "duplicate STARTED must log exactly one error"
+                )
                 assert "1000" in error_records[0].getMessage()
                 assert "5000" in error_records[0].getMessage()
             finally:
@@ -880,6 +880,45 @@ class TestAsyncTriggers:
                 agg.close()
 
     @pytest.mark.asyncio
+    async def test_isl_structured_prompt_includes_reasoning_and_tools(self, tmp_path):
+        loop = asyncio.get_event_loop()
+        tokenizer = MockBatchTokenizer()
+        messages = (
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "reasoning_content": "think carefully",
+                "content": None,
+                "tool_calls": ({"function": {"name": "lookup"}},),
+            },
+            {"role": "tool", "content": "tool result"},
+        )
+        tools = ({"function": {"name": "lookup"}},)
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_isl_structured", tokenizer=tokenizer
+            )
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(messages=messages, tools=tools),
+                        ),
+                    ]
+                )
+                await agg._token_queue.drain_all()
+                assert snapshot_series_count(registry, MetricSeriesKey.ISL.value) == 1
+                assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) > 5
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
     async def test_osl_emitted_on_complete(self, tmp_path):
         """OSL is emitted via async tokenization when COMPLETE carries text."""
         loop = asyncio.get_event_loop()
@@ -1084,9 +1123,9 @@ class TestAsyncTriggers:
                 assert agg._token_queue is not None
                 assert agg._token_queue._live_task is not None
                 await agg.process([session_event(SessionEventType.ENDED, ts=100)])
-                assert (
-                    agg._token_queue._live_task is None
-                ), "drain must stop the live loop"
+                assert agg._token_queue._live_task is None, (
+                    "drain must stop the live loop"
+                )
             finally:
                 agg.close()
 
@@ -1242,9 +1281,9 @@ class TestAsyncTriggers:
                     ]
                 )
                 assert agg._token_queue is not None
-                assert (
-                    agg._token_queue.pending > 0
-                ), "precondition: ISL must be buffered before ENDED"
+                assert agg._token_queue.pending > 0, (
+                    "precondition: ISL must be buffered before ENDED"
+                )
                 await agg.process([session_event(SessionEventType.ENDED, ts=2000)])
 
                 publisher.publish_final.assert_awaited_once()

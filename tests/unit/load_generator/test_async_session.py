@@ -163,6 +163,53 @@ class TestPhaseIssuer:
         assert issued_events[0].conversation_id == ""
         assert issued_events[0].turn is None
 
+    def test_issue_preserves_structured_chat_input_for_isl(self):
+        class ChatDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {
+                    "messages": [
+                        {"role": "user", "content": "question"},
+                        {
+                            "role": "assistant",
+                            "reasoning_content": "reasoning",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call-1",
+                            "content": "result",
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {"name": "lookup", "parameters": {}},
+                        }
+                    ],
+                }
+
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(ChatDataset(1), issuer, publisher, lambda: False)
+
+        phase_issuer.issue(0, conversation_id="conv-1", turn=2)
+
+        prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
+        assert prompt.messages == tuple(issuer.issued_queries[0].data["messages"])
+        assert prompt.tools == tuple(issuer.issued_queries[0].data["tools"])
+        assert prompt.text is None
+
     def test_issue_returns_none_when_stopped(self):
         dataset = FakeDataset(5)
         issuer = FakeIssuer()

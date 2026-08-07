@@ -354,6 +354,47 @@ class TestOslTriggerToolCalls:
 
         assert snapshot_series_count(registry, "osl") == 1
 
+    async def test_osl_with_reasoning_uses_structured_message_path(self):
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            OslTrigger,
+            SampleRow,
+        )
+        from inference_endpoint.core.types import TextModelOutput
+
+        class CapturingTokenizer:
+            def __init__(self):
+                self.messages = []
+
+            async def count_texts_async(self, *args, **kwargs):
+                raise AssertionError("reasoning output must not use flattened text")
+
+            async def token_count_message_async(
+                self, content, reasoning, tool_calls, _loop
+            ):
+                self.messages.append((content, reasoning, tool_calls))
+                return 4
+
+        registry = MetricsRegistry()
+        registry.register_series("osl", hdr_low=1, hdr_high=100_000)
+        tokenizer = CapturingTokenizer()
+        queue = TokenBatchQueue(tokenizer, asyncio.get_running_loop())
+        trigger = OslTrigger(registry, queue)
+        output = TextModelOutput(output="answer", reasoning="private reasoning")
+
+        trigger.fire(
+            EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                timestamp_ns=1000,
+                sample_uuid="s1",
+                data=output,
+            ),
+            SampleRow(sample_uuid="s1"),
+            {},
+        )
+        await queue.drain_all()
+
+        assert tokenizer.messages == [("answer", "private reasoning", None)]
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio

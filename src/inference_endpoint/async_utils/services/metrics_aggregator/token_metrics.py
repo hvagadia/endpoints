@@ -17,13 +17,15 @@
 
 ``BatchTokenizer`` tokenizes whole batches at once, sharded across worker
 processes each pinned to a block of ``CORES_PER_WORKER`` cores (a single BPE
-rayon pool is memory-bound and saturates ~8 cores). The aggregator buffers
+backend pool is memory-bound and saturates ~8 cores). The aggregator buffers
 per-sample text. The sharded pool is the drain-phase accelerator and is
 auto-sized (one shard per core block); live mid-run flushes run on a small
 in-process thread pool (``--tokenizer-workers``, default 2) owned by the
-queue's live loop. A tokenizer without a fast (Rust) backend is a startup
-error, never a silent slow path. Platforms without CPU affinity (e.g. macOS)
-shard unpinned at full speed; only cache/NUMA locality is lost.
+queue's live loop. Hugging Face fast tokenizers use their Rust backend;
+tokenizers that expose tiktoken through custom Python code use that official
+wrapper so its preprocessing semantics are preserved. Platforms without CPU
+affinity (e.g. macOS) shard unpinned at full speed; only cache/NUMA locality is
+lost.
 """
 
 from __future__ import annotations
@@ -111,6 +113,37 @@ def _normalize_tool_calls_for_template(
 _WORKER_BACKEND: Any = None
 
 
+class _PythonTokenizerBackend:
+    """Use a custom tokenizer's public API instead of bypassing its Python logic."""
+
+    def __init__(self, tokenizer: Any) -> None:
+        self.tokenizer = tokenizer
+
+    def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
+        return self.tokenizer.encode(text, add_special_tokens=add_special_tokens)
+
+    def encode_lengths(self, texts: list[str]) -> list[int]:
+        return [len(self.encode(text, add_special_tokens=False)) for text in texts]
+
+
+def _backend_from_tokenizer(tokenizer: Any) -> Any | None:
+    """Return the tokenizer's supported length-counting path."""
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        return backend
+
+    model = getattr(tokenizer, "model", None)
+    model_type = type(model)
+    if (
+        model_type.__module__ == "tiktoken.core"
+        and model_type.__name__ == "Encoding"
+        and callable(getattr(model, "encode", None))
+        and callable(getattr(model, "encode_batch", None))
+    ):
+        return _PythonTokenizerBackend(tokenizer)
+    return None
+
+
 def load_reference_tokenizer(tokenizer_name: str) -> Any:
     """Load the run's reference tokenizer.
 
@@ -123,29 +156,31 @@ def load_reference_tokenizer(tokenizer_name: str) -> Any:
 
 
 def load_reference_backend(tokenizer_name: str) -> Any | None:
-    """Raw tokenizers backend (fast Rust path) for length counting.
+    """Supported token-counting path for the reference tokenizer.
 
-    Counting through the backend avoids the transformers "sequence longer than
-    model_max_length" warning the Python wrapper emits, so no ``model_max_length``
-    override is needed. ``None`` if the tokenizer has no fast backend.
+    Hugging Face fast tokenizers use their native backend. Custom tiktoken
+    tokenizers use their public Python API so model-specific preprocessing is
+    not reimplemented here. ``None`` if neither path is available.
     """
-    return getattr(load_reference_tokenizer(tokenizer_name), "backend_tokenizer", None)
+    return _backend_from_tokenizer(load_reference_tokenizer(tokenizer_name))
 
 
 def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
-    """Pin this worker to ``core_set``, then load the raw tokenizers backend.
+    """Pin this worker to ``core_set``, then load its token-counting path.
 
-    Affinity is set before the first encode so the Rust rayon pool sizes itself
-    to the pinned core count (num_cpus respects sched_getaffinity on Linux).
+    Affinity is set before the first encode so the Hugging Face rayon pool sizes
+    itself to the pinned core count (num_cpus respects sched_getaffinity on
+    Linux). Custom wrappers scale through these process shards.
     """
     # Ctrl-C sends SIGINT to the whole foreground process group; the parent
     # drives worker shutdown, so a worker dying mid-drain would break the pool
     # and lose the buffered tokenizations it was counting.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if core_set:
-        # Size the rayon pool to the block explicitly: the parent process caps
-        # its own pool for the live lane, and spawn children inherit that env —
-        # without the override every shard would run at the live-lane width.
+        # Size the Hugging Face rayon pool to the block explicitly: the parent
+        # process caps its own pool for the live lane, and spawn children inherit
+        # that env — without the override every shard would run at the live-lane
+        # width.
         os.environ["RAYON_NUM_THREADS"] = str(len(core_set))
         try:
             os.sched_setaffinity(0, set(core_set))
@@ -164,9 +199,12 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
 
 
 def encode_lengths(backend: Any, texts: list[str]) -> list[int]:
-    """Per-text token counts via the raw tokenizers backend, one rayon call."""
+    """Per-text token counts via one bounded backend batch call."""
+    if isinstance(backend, _PythonTokenizerBackend):
+        return backend.encode_lengths(texts)
     encode_batch = getattr(backend, "encode_batch_fast", None) or backend.encode_batch
-    return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
+    encoded = encode_batch(texts, add_special_tokens=False)
+    return [len(getattr(item, "ids", item)) for item in encoded]
 
 
 def _worker_encode_lengths(texts: list[str]) -> list[int]:
@@ -233,10 +271,8 @@ class BatchTokenizer:
         n_workers: int = -1,
     ) -> None:
         self._tokenizer_name = tokenizer_name
-        # The live lane runs in-process: cap this process's rayon pool so a
-        # mid-run batched encode uses ~live_workers cores, not the whole
-        # machine. Must be set before the first encode initializes the pool;
-        # setdefault lets an operator-exported RAYON_NUM_THREADS win.
+        # The live lane runs in-process: cap the Hugging Face rayon pool before
+        # its first encode. setdefault lets an operator-exported HF cap win.
         os.environ.setdefault("RAYON_NUM_THREADS", str(max(1, live_workers)))
         self._fallback_warned: set[str] = set()
         self._tokenizer: PreTrainedTokenizerBase | None = None
@@ -260,25 +296,26 @@ class BatchTokenizer:
     def _load_tokenizer(self) -> None:
         tok = load_reference_tokenizer(self._tokenizer_name)
         self._tokenizer = tok
+        self._backend = _backend_from_tokenizer(tok)
         # Baseline = tokens from a [user, empty-assistant] pair minus the [user]
         # prefix alone, so the assistant frame is subtracted from message counts.
         try:
             prefix = cast(
-                str,
+                list[int],
                 tok.apply_chat_template(
-                    [_PREFIX_USER_MSG], tokenize=False, add_generation_prompt=False
+                    [_PREFIX_USER_MSG], tokenize=True, add_generation_prompt=False
                 ),
             )
-            self._prefix_len = len(tok.tokenize(prefix))
+            self._prefix_len = len(prefix)
             with_assistant = cast(
-                str,
+                list[int],
                 tok.apply_chat_template(
                     [_PREFIX_USER_MSG, {"role": "assistant", "content": ""}],
-                    tokenize=False,
+                    tokenize=True,
                     add_generation_prompt=False,
                 ),
             )
-            self._baseline = len(tok.tokenize(with_assistant)) - self._prefix_len
+            self._baseline = len(with_assistant) - self._prefix_len
         except Exception:
             self._prefix_len = 0
             self._baseline = 0
@@ -295,19 +332,17 @@ class BatchTokenizer:
         (``< 0``) fits one shard per ``cores_per_worker`` block of this
         process's affinity mask (or the online CPU count when the platform
         has no affinity API — shards then run unpinned), always at least one;
-        an explicit count is clamped to that capacity. An environment that
-        cannot shard — no fast Rust backend, a warmup that fails or exceeds
-        its budget — raises instead of silently degrading to a slow path
-        that cannot keep up with completions.
+        an explicit count is clamped to that capacity. An unsupported tokenizer
+        or a shard warmup that fails or exceeds its budget raises at startup.
         """
         if cores_per_worker <= 0 or n_workers == 0:
             logger.info("BatchTokenizer: in-process tokenization (explicit)")
             return
-        if getattr(self._tokenizer, "backend_tokenizer", None) is None:
+        if self._backend is None:
             raise RuntimeError(
-                f"tokenizer {self._tokenizer_name!r} has no fast (Rust) "
-                "backend; token metrics require one to keep up with "
-                "completions. Use a fast tokenizer, or disable token metrics."
+                f"tokenizer {self._tokenizer_name!r} has no supported "
+                "token-counting path; use a Hugging Face fast tokenizer or a "
+                "supported custom tiktoken tokenizer."
             )
         # The full allowed CPU universe (cgroup-clamped) drives the shard block
         # math. cgroup_clamped_cpus owns the probe-and-restore of this process's
@@ -365,7 +400,7 @@ class BatchTokenizer:
 
     def _encode_lengths_inproc(self, texts: list[str]) -> list[int]:
         tok = self._tokenizer
-        backend = getattr(tok, "backend_tokenizer", None)
+        backend = self._backend
         if backend is not None:
             return encode_lengths(backend, texts)
         return [len(tok.tokenize(t)) for t in texts]  # type: ignore[union-attr]
@@ -424,11 +459,10 @@ class BatchTokenizer:
         if tool_calls:
             msg["tool_calls"] = _normalize_tool_calls_for_template(tool_calls)
         try:
-            rendered = tok.apply_chat_template(  # type: ignore[union-attr]
-                [_PREFIX_USER_MSG, msg], tokenize=False, add_generation_prompt=False
+            encoded = tok.apply_chat_template(  # type: ignore[union-attr]
+                [_PREFIX_USER_MSG, msg], tokenize=True, add_generation_prompt=False
             )
-            full = len(tok.tokenize(rendered))  # type: ignore[union-attr]
-            return max(0, full - self._prefix_len - self._baseline)
+            return max(0, len(encoded) - self._prefix_len - self._baseline)
         except Exception as exc:
             key = f"{self._tokenizer_name}:{type(exc).__name__}"
             if key not in self._fallback_warned:
@@ -462,6 +496,36 @@ class BatchTokenizer:
             self._thread, self._token_count_message, content, reasoning, tool_calls
         )
 
+    def _token_count_prompt(
+        self,
+        messages: tuple[dict[str, Any], ...],
+        tools: tuple[dict[str, Any], ...] | None,
+    ) -> int:
+        kwargs: dict[str, Any] = {
+            "tokenize": True,
+            "add_generation_prompt": True,
+        }
+        if tools is not None:
+            kwargs["tools"] = list(tools)
+        encoded = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
+            list(messages), **kwargs
+        )
+        return len(encoded)
+
+    async def token_count_prompt_async(
+        self,
+        messages: tuple[dict[str, Any], ...],
+        tools: tuple[dict[str, Any], ...] | None,
+        loop: asyncio.AbstractEventLoop,
+        /,
+    ) -> int:
+        """Complete chat-prompt token count without blocking the loop."""
+        if self._thread is None:
+            raise RuntimeError("BatchTokenizer is closed")
+        return await loop.run_in_executor(
+            self._thread, self._token_count_prompt, messages, tools
+        )
+
     def close(self) -> None:
         """Shut down all workers. Idempotent.
 
@@ -484,9 +548,10 @@ class BatchTokenizer:
         self.close()
 
 
-# Type alias for the (content, reasoning, tool_calls) tuple a message trigger
-# enqueues for chat-template tokenization.
+# Message means the structured assistant output used for OSL/TPOT tokenization.
 MessageParts = tuple[str, str | None, tuple[dict[str, Any], ...] | None]
+# Prompt means the complete chat input and tool definitions used for ISL.
+PromptParts = tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...] | None]
 
 
 class TokenCounter(Protocol):
@@ -519,12 +584,22 @@ class TokenCounter(Protocol):
         """Chat-template token count for one assistant message."""
         raise NotImplementedError
 
+    async def token_count_prompt_async(
+        self,
+        messages: tuple[dict[str, Any], ...],
+        tools: tuple[dict[str, Any], ...] | None,
+        loop: asyncio.AbstractEventLoop,
+        /,
+    ) -> int:
+        """Chat-template token count for one complete input prompt."""
+        raise NotImplementedError
+
 
 class TokenBatchQueue:
     """Buffers per-sample tokenization work and clears it in batches.
 
-    Triggers call ``enqueue_text`` / ``enqueue_message`` at event time with an
-    ``on_count`` callback that records the resulting metric. The queue owns
+    Triggers enqueue plain text, assistant messages, or complete chat prompts
+    at event time with a callback that records the resulting metric. The queue owns
     its own flush cadence: ``start_live`` begins a periodic flush through the
     tokenizer's bounded live lane (so live ISL/OSL/TPOT stay current without
     touching the benchmark's cores), and ``flush_remaining`` drains everything
@@ -542,6 +617,7 @@ class TokenBatchQueue:
         self._loop = loop
         self._text: list[tuple[str, Callable[[int], None]]] = []
         self._msg: list[tuple[MessageParts, Callable[[int], None]]] = []
+        self._prompt: list[tuple[PromptParts, Callable[[int], None]]] = []
         self._inflight = 0
         self._live_task: asyncio.Task | None = None
         # Serializes flushes so the periodic live flush and the end-of-run
@@ -590,6 +666,12 @@ class TokenBatchQueue:
         self._inflight += 1
         self._msg.append((parts, on_count))
 
+    def enqueue_prompt(
+        self, parts: PromptParts, on_count: Callable[[int], None]
+    ) -> None:
+        self._inflight += 1
+        self._prompt.append((parts, on_count))
+
     async def flush_live_once(self) -> None:
         """One bounded mid-run flush (live lane).
 
@@ -618,7 +700,7 @@ class TokenBatchQueue:
         in the next flush. Callers use ``flush_live_once`` / ``drain_all``.
         """
         async with self._lock:
-            if not (self._text or self._msg):
+            if not (self._text or self._msg or self._prompt):
                 return
             if live:
                 cap = _LIVE_FLUSH_MAX_ITEMS
@@ -626,9 +708,12 @@ class TokenBatchQueue:
                 del self._text[:cap]  # in-place: O(cap), not O(backlog).
                 msg_items = self._msg[:cap]
                 del self._msg[:cap]
+                prompt_items = self._prompt[:cap]
+                del self._prompt[:cap]
             else:
                 text_items, self._text = self._text, []
                 msg_items, self._msg = self._msg, []
+                prompt_items, self._prompt = self._prompt, []
             # The text and message phases fail independently — they run on
             # separate executors, so a dead text shard must not drop message
             # items that would still succeed (and vice versa). The first
@@ -643,6 +728,7 @@ class TokenBatchQueue:
                     if live:
                         self._text[:0] = text_items
                         self._msg[:0] = msg_items
+                        self._prompt[:0] = prompt_items
                     raise
                 except Exception as exc:  # noqa: BLE001 — isolate phases.
                     failure = exc
@@ -676,11 +762,27 @@ class TokenBatchQueue:
                 except asyncio.CancelledError:
                     if live:
                         self._msg[:0] = msg_items[i:]
+                        self._prompt[:0] = prompt_items
                     raise
                 except Exception as exc:  # noqa: BLE001 — isolate items.
                     failure = failure or exc
                     if live:
                         self._msg.append(((content, reasoning, tool_calls), on_count))
+                    continue
+                self._record(on_count, count)
+            for i, ((messages, tools), on_count) in enumerate(prompt_items):
+                try:
+                    count = await self._tokenizer.token_count_prompt_async(
+                        messages, tools, self._loop
+                    )
+                except asyncio.CancelledError:
+                    if live:
+                        self._prompt[:0] = prompt_items[i:]
+                    raise
+                except Exception as exc:  # noqa: BLE001 — isolate items.
+                    failure = failure or exc
+                    if live:
+                        self._prompt.append(((messages, tools), on_count))
                     continue
                 self._record(on_count, count)
             if failure is not None:

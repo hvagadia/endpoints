@@ -172,6 +172,29 @@ class TestEventRecordRoundTrip:
         assert decoded.data.token_ids == (101, 202, 303)
         assert decoded.data.text is None
 
+    def test_sample_event_round_trips_with_structured_prompt_data(self):
+        messages = (
+            {"role": "user", "content": "question"},
+            {
+                "role": "assistant",
+                "reasoning_content": "reasoning",
+                "tool_calls": [{"function": {"name": "lookup"}}],
+            },
+        )
+        tools = ({"function": {"name": "lookup"}},)
+        record = EventRecord(
+            event_type=SampleEventType.ISSUED,
+            sample_uuid="sample-chat",
+            data=PromptData(messages=messages, tools=tools),
+        )
+
+        _, payload = _codec.encode(record)
+        decoded = _codec.decode(payload)
+
+        assert isinstance(decoded.data, PromptData)
+        assert decoded.data.messages == messages
+        assert decoded.data.tools == tools
+
     def test_error_event_round_trips_with_error_data(self):
         record = EventRecord(
             event_type=ErrorEventType.LOADGEN,
