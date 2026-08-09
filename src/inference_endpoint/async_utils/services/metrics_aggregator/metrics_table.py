@@ -60,6 +60,7 @@ class MetricSeriesKey(str, Enum):
 
     ISL = "isl"
     OSL = "osl"
+    E2E_TURN_SPEED = "e2e_turn_speed"
     SAMPLE_LATENCY_NS = "sample_latency_ns"
     TTFT_NS = "ttft_ns"
     CHUNK_DELTA_NS = "chunk_delta_ns"
@@ -337,14 +338,41 @@ class IslTrigger(TokenTrigger):
 
 
 class OslTrigger(TokenTrigger):
-    """OSL = token_count(full output text) from COMPLETE event data."""
+    """Record OSL and E2E turn speed from COMPLETE event data."""
 
     def __init__(
         self,
         registry: MetricsRegistry,
         queue: TokenBatchQueue | None,
     ):
-        super().__init__(MetricSeriesKey.OSL, registry, queue)
+        super().__init__(
+            MetricSeriesKey.OSL,
+            registry,
+            queue,
+            requires=(SampleField.ISSUED_NS,),
+        )
+
+    def _make_recorder(self, ev_rec, pre_change):
+        record_osl = super()._make_recorder(ev_rec, pre_change)
+        registry = self.registry
+        issued_ns = pre_change.get(SampleField.ISSUED_NS)
+
+        def record(count: int) -> None:
+            record_osl(count)
+            if (
+                count <= 0
+                or issued_ns is None
+                or not registry.has_series(MetricSeriesKey.E2E_TURN_SPEED.value)
+            ):
+                return
+            latency_ns = ev_rec.timestamp_ns - issued_ns
+            if latency_ns > 0:
+                registry.record(
+                    MetricSeriesKey.E2E_TURN_SPEED.value,
+                    count * 1e9 / latency_ns,
+                )
+
+        return record
 
     def _extract_text(self, ev_rec, row, pre_change):
         if isinstance(ev_rec.data, TextModelOutput):

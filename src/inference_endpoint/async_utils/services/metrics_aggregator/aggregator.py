@@ -110,6 +110,7 @@ _TRACKED_SAMPLE_EVENTS = frozenset(
 # clamped on insert and a warning is logged once per series.
 _NS_HDR_LOW: Final[int] = 1
 _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
+_TOKENS_PER_SECOND_HDR_HIGH: Final[int] = 10_000_000
 
 
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
@@ -213,6 +214,14 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             hdr_high=TOKEN_HDR_HIGH,
             sig_figs=sig_figs,
             n_histogram_buckets=n_histogram_buckets,
+        )
+        self._registry.register_series(
+            MetricSeriesKey.E2E_TURN_SPEED.value,
+            hdr_low=1,
+            hdr_high=_TOKENS_PER_SECOND_HDR_HIGH,
+            sig_figs=sig_figs,
+            n_histogram_buckets=n_histogram_buckets,
+            dtype=float,
         )
 
         # Streaming-only series
