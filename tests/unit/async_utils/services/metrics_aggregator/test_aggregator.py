@@ -342,9 +342,9 @@ class TestTimingMetrics:
                 )
                 # OSL = token_count("hello world") = 2
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 2
-                # E2E turn speed = 2 tokens / 2000 ns = 1,000,000 tokens/s.
+                # E2E interactivity = 2 tokens / 2000 ns = 1,000,000 tokens/s.
                 assert snapshot_series_total(
-                    registry, MetricSeriesKey.E2E_TURN_SPEED.value
+                    registry, MetricSeriesKey.E2E_INTERACTIVITY.value
                 ) == pytest.approx(1_000_000.0)
                 assert (
                     snapshot_series_count(registry, MetricSeriesKey.TTFT_NS.value) == 0
@@ -496,9 +496,9 @@ class TestEdgeCases:
                 error_records = [
                     r for r in caplog.records if "Duplicate STARTED" in r.message
                 ]
-                assert len(error_records) == 1, (
-                    "duplicate STARTED must log exactly one error"
-                )
+                assert (
+                    len(error_records) == 1
+                ), "duplicate STARTED must log exactly one error"
                 assert "1000" in error_records[0].getMessage()
                 assert "5000" in error_records[0].getMessage()
             finally:
@@ -1127,9 +1127,9 @@ class TestAsyncTriggers:
                 assert agg._token_queue is not None
                 assert agg._token_queue._live_task is not None
                 await agg.process([session_event(SessionEventType.ENDED, ts=100)])
-                assert agg._token_queue._live_task is None, (
-                    "drain must stop the live loop"
-                )
+                assert (
+                    agg._token_queue._live_task is None
+                ), "drain must stop the live loop"
             finally:
                 agg.close()
 
@@ -1285,9 +1285,9 @@ class TestAsyncTriggers:
                     ]
                 )
                 assert agg._token_queue is not None
-                assert agg._token_queue.pending > 0, (
-                    "precondition: ISL must be buffered before ENDED"
-                )
+                assert (
+                    agg._token_queue.pending > 0
+                ), "precondition: ISL must be buffered before ENDED"
                 await agg.process([session_event(SessionEventType.ENDED, ts=2000)])
 
                 publisher.publish_final.assert_awaited_once()

@@ -60,7 +60,7 @@ class MetricSeriesKey(str, Enum):
 
     ISL = "isl"
     OSL = "osl"
-    E2E_TURN_SPEED = "e2e_turn_speed"
+    E2E_INTERACTIVITY = "e2e_interactivity"
     SAMPLE_LATENCY_NS = "sample_latency_ns"
     TTFT_NS = "ttft_ns"
     CHUNK_DELTA_NS = "chunk_delta_ns"
@@ -338,7 +338,7 @@ class IslTrigger(TokenTrigger):
 
 
 class OslTrigger(TokenTrigger):
-    """Record OSL and E2E turn speed from COMPLETE event data."""
+    """Record OSL and E2E interactivity from COMPLETE event data."""
 
     def __init__(
         self,
@@ -362,13 +362,13 @@ class OslTrigger(TokenTrigger):
             if (
                 count <= 0
                 or issued_ns is None
-                or not registry.has_series(MetricSeriesKey.E2E_TURN_SPEED.value)
+                or not registry.has_series(MetricSeriesKey.E2E_INTERACTIVITY.value)
             ):
                 return
             latency_ns = ev_rec.timestamp_ns - issued_ns
             if latency_ns > 0:
                 registry.record(
-                    MetricSeriesKey.E2E_TURN_SPEED.value,
+                    MetricSeriesKey.E2E_INTERACTIVITY.value,
                     count * 1e9 / latency_ns,
                 )
 

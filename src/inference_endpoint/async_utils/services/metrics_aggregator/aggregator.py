@@ -216,7 +216,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             n_histogram_buckets=n_histogram_buckets,
         )
         self._registry.register_series(
-            MetricSeriesKey.E2E_TURN_SPEED.value,
+            MetricSeriesKey.E2E_INTERACTIVITY.value,
             hdr_low=1,
             hdr_high=_TOKENS_PER_SECOND_HDR_HIGH,
             sig_figs=sig_figs,

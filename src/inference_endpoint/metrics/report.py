@@ -202,7 +202,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     tpot: dict[str, Any]
     latency: dict[str, Any]
     output_sequence_lengths: dict[str, Any]
-    e2e_turn_speed: dict[str, Any]
+    e2e_interactivity: dict[str, Any]
     # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
     # issued request -> completion of the last-issued request
     # (final_query_all_samples_done_time analog; see mlcommons/inference
@@ -299,7 +299,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         duration_ns = raw_duration_ns if raw_duration_ns > 0 else None
         n_completed = _counter("tracked_samples_completed")
         osl = _series_dict("osl")
-        e2e_turn_speed = _series_dict("e2e_turn_speed")
+        e2e_interactivity = _series_dict("e2e_interactivity")
 
         # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
         # issued request -> completion of the last-issued request
@@ -364,7 +364,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 for series, field in SERIES_TO_SUMMARY_FIELD.items()
             },
             output_sequence_lengths=osl,
-            e2e_turn_speed=e2e_turn_speed,
+            e2e_interactivity=e2e_interactivity,
             legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
@@ -500,8 +500,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             ("Latency", self.latency, "ms", 1e-6),
             ("Output sequence lengths", self.output_sequence_lengths, "tokens", 1.0),
             (
-                "E2E turn speed (output tokens/s)",
-                self.e2e_turn_speed,
+                "E2E interactivity (output tokens/s)",
+                self.e2e_interactivity,
                 "tokens/s",
                 1.0,
             ),
