@@ -155,11 +155,6 @@ def _normalize_prompt_messages_for_template(
 _WORKER_TEXT_BACKEND: Any = None
 
 
-def _backend_from_tokenizer(tokenizer: Any) -> Any | None:
-    """Return the optional fast backend used only for plain-text counting."""
-    return getattr(tokenizer, "backend_tokenizer", None)
-
-
 def load_reference_tokenizer(tokenizer_name: str) -> Any:
     """Load the run's reference tokenizer.
 
@@ -173,7 +168,8 @@ def load_reference_tokenizer(tokenizer_name: str) -> Any:
 
 def load_reference_backend(tokenizer_name: str) -> Any | None:
     """Load the optional fast backend used only for plain-text counting."""
-    return _backend_from_tokenizer(load_reference_tokenizer(tokenizer_name))
+    tokenizer = load_reference_tokenizer(tokenizer_name)
+    return getattr(tokenizer, "backend_tokenizer", None)
 
 
 def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
@@ -302,7 +298,7 @@ class BatchTokenizer:
     def _load_tokenizer(self) -> None:
         tok = load_reference_tokenizer(self._tokenizer_name)
         self._tokenizer = tok
-        self._text_backend = _backend_from_tokenizer(tok)
+        self._text_backend = getattr(tok, "backend_tokenizer", None)
         # Baseline = tokens from a [user, empty-assistant] pair minus the [user]
         # prefix alone, so the assistant frame is subtracted from message counts.
         try:
