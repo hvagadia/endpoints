@@ -42,8 +42,8 @@ _MOCK_TARGET = "inference_endpoint.async_utils.services.metrics_aggregator.token
 class _FakeTokenizer:
     """Deterministic tokenizer that splits on whitespace.
 
-    Has no ``backend_tokenizer``, so BatchTokenizer keeps the batch path
-    in-process (no subprocess shards) and counts via ``tokenize`` per text.
+    Has no ``backend_tokenizer`` and therefore supports only the structured
+    chat-template path when a subclass supplies ``apply_chat_template``.
     """
 
     def __init__(self, load_delay: float = 0.0):
@@ -86,7 +86,7 @@ class _BrokenProc:
 class TestBatchTokenizer:
     @pytest.mark.asyncio
     async def test_count_texts_async(self):
-        with patch(_MOCK_TARGET, _FakeTokenizer):
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
             loop = asyncio.get_running_loop()
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 counts = await tok.count_texts_async(["Hello world foo", "a"], loop)
@@ -98,6 +98,16 @@ class TestBatchTokenizer:
             loop = asyncio.get_running_loop()
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 assert await tok.count_texts_async([], loop) == []
+
+    @pytest.mark.asyncio
+    async def test_plain_text_requires_a_text_backend(self):
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                with pytest.raises(
+                    RuntimeError, match="plain-text tokenization.*backend"
+                ):
+                    await tok.count_texts_async(["Hello world"], loop)
 
     @pytest.mark.asyncio
     async def test_count_texts_async_sharded(self):
@@ -139,7 +149,12 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
     """Tokenizer that supports apply_chat_template for tool-call testing."""
 
     def apply_chat_template(
-        self, messages, tools=None, tokenize=False, add_generation_prompt=False
+        self,
+        messages,
+        tools=None,
+        tokenize=False,
+        add_generation_prompt=False,
+        return_dict=True,
     ):
         # Simulate 2 wrapper tokens for the template frame.
         parts = ["WRAPPER", "WRAPPER"]
@@ -159,12 +174,27 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
             parts.append("GENERATION")
         rendered = " ".join(parts)
         if tokenize:
-            return list(range(len(rendered.split())))
+            token_ids = list(range(len(rendered.split())))
+            if return_dict:
+                return {
+                    "input_ids": token_ids,
+                    "attention_mask": [1] * len(token_ids),
+                }
+            return token_ids
         return rendered
 
 
 @pytest.mark.unit
 class TestBatchTokenizerMessageTokenization:
+    def test_chat_template_requests_token_ids_not_batch_encoding(self):
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                count = tok._token_count_prompt(
+                    ({"role": "user", "content": "one two three four"},), None
+                )
+
+                assert count == 7
+
     @pytest.mark.asyncio
     async def test_token_count_prompt_preserves_messages_tools_and_generation_prompt(
         self,
@@ -255,6 +285,74 @@ class TestBatchTokenizerMessageTokenization:
                 )
                 assert count > 0
 
+    def test_token_count_prompt_falls_back_to_text_only_multimodal_messages(self):
+        class _TextOnlyTemplateTokenizer(_FakeTokenizerWithTemplate):
+            def apply_chat_template(self, messages, **kwargs):
+                if any(
+                    isinstance(message.get("content"), list) for message in messages
+                ):
+                    raise TypeError("text-only template")
+                return super().apply_chat_template(messages, **kwargs)
+
+        with patch(_MOCK_TARGET, _TextOnlyTemplateTokenizer):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                count = tok._token_count_prompt(
+                    (
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe this image"},
+                                {"type": "image_url", "image_url": {"url": "x"}},
+                            ],
+                        },
+                    ),
+                    None,
+                )
+
+                assert count == 6
+
+    def test_token_count_prompt_normalizes_tools_and_forwards_template_kwargs(self):
+        class _RecordingTokenizer(_FakeTokenizerWithTemplate):
+            last_messages = None
+            last_kwargs = None
+
+            def apply_chat_template(self, messages, **kwargs):
+                type(self).last_messages = messages
+                type(self).last_kwargs = dict(kwargs)
+                kwargs.pop("enable_thinking", None)
+                return super().apply_chat_template(messages, **kwargs)
+
+        messages = (
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": '{"city": "SF"}',
+                        },
+                    }
+                ],
+            },
+        )
+        with patch(_MOCK_TARGET, _RecordingTokenizer):
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
+                tok._token_count_prompt(
+                    messages,
+                    None,
+                    {"enable_thinking": False},
+                )
+
+        normalized_call = _RecordingTokenizer.last_messages[0]["tool_calls"][0]
+        assert normalized_call["function"]["arguments"] == {"city": "SF"}
+        assert messages[0]["tool_calls"][0]["function"]["arguments"] == (
+            '{"city": "SF"}'
+        )
+        assert _RecordingTokenizer.last_kwargs["enable_thinking"] is False
+        assert _RecordingTokenizer.last_kwargs["return_dict"] is False
+
 
 class _Encoding:
     def __init__(self, n: int):
@@ -273,31 +371,6 @@ class _SlowBackend:
 
     def encode_batch(self, texts, add_special_tokens=False):
         return [_Encoding(len(t.split())) for t in texts]
-
-
-class Encoding:
-    """Stand-in that fails if code bypasses the tokenizer wrapper."""
-
-    __module__ = "tiktoken.core"
-
-    def encode(self, *args, **kwargs):
-        raise AssertionError("raw tiktoken encode must not be called")
-
-    def encode_batch(self, *args, **kwargs):
-        raise AssertionError("raw tiktoken encode_batch must not be called")
-
-
-class _FakeTokenizerWithTikTokenModel(_FakeTokenizer):
-    """Kimi-shaped custom tokenizer backed by the Rust tiktoken core."""
-
-    def __init__(self, load_delay: float = 0.0):
-        super().__init__(load_delay)
-        self.model = Encoding()
-        self.encode_calls: list[tuple[str, bool]] = []
-
-    def encode(self, text, *, add_special_tokens=False):
-        self.encode_calls.append((text, add_special_tokens))
-        return text.split()
 
 
 @pytest.mark.unit
@@ -327,48 +400,15 @@ class TestEncodeHelpers:
         assert captured["name"] == "m"
         assert captured["kwargs"].get("trust_remote_code") is True
 
-    def test_load_reference_backend_uses_kimi_python_wrapper(self, monkeypatch):
-        """Kimi counting must not bypass its Python tokenizer wrapper."""
-
-        class _FakeAutoTokenizer:
-            @staticmethod
-            def from_pretrained(name, **kwargs):
-                assert name == "kimi"
-                assert kwargs == {"trust_remote_code": True}
-                return _FakeTokenizerWithTikTokenModel()
-
-        monkeypatch.setattr(token_metrics_module, "AutoTokenizer", _FakeAutoTokenizer)
-        backend = token_metrics_module.load_reference_backend("kimi")
-        assert backend is not None
-        assert encode_lengths(backend, ["a b", "c"]) == [2, 1]
-        assert backend.tokenizer.encode_calls == [("a b", False), ("c", False)]
-
-    def test_load_reference_backend_rejects_tiktoken_lookalike(self, monkeypatch):
-        class _LookalikeEncoding:
-            def encode(self, text, *, allowed_special):
-                return text.split()
-
-            def encode_batch(self, texts, *, allowed_special):
-                return [text.split() for text in texts]
-
-        class _FakeTok:
-            model = _LookalikeEncoding()
-
-        class _FakeAutoTokenizer:
-            @staticmethod
-            def from_pretrained(name, **kwargs):
-                return _FakeTok()
-
-        monkeypatch.setattr(token_metrics_module, "AutoTokenizer", _FakeAutoTokenizer)
-        assert token_metrics_module.load_reference_backend("lookalike") is None
-
     def test_worker_encode_lengths_raises_without_backend(self, monkeypatch):
-        monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", None)
+        monkeypatch.setattr(token_metrics_module, "_WORKER_TEXT_BACKEND", None)
         with pytest.raises(RuntimeError, match="backend unavailable"):
             _worker_encode_lengths(["a"])
 
     def test_worker_encode_lengths_uses_backend(self, monkeypatch):
-        monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", _FastBackend())
+        monkeypatch.setattr(
+            token_metrics_module, "_WORKER_TEXT_BACKEND", _FastBackend()
+        )
         assert _worker_encode_lengths(["a b", "c d e"]) == [2, 3]
 
 
@@ -399,8 +439,8 @@ class TestSetupShardsDecisions:
     clamped / 0 explicit in-process (auto-sized in production — the CLI's
     --tokenizer-workers maps to the live thread lane, not to shards).
 
-    An environment that cannot shard is a startup error — never a silent
-    in-process fallback.
+    A fast text backend is optional. If present, shard warmup failures are
+    startup errors rather than silent in-process fallbacks.
     """
 
     def _make(self, monkeypatch, cpus, n_workers, executor=_SpawnlessExecutor):
@@ -434,27 +474,19 @@ class TestSetupShardsDecisions:
             blocks = [set(ex.initargs[1]) for ex in tok._procs]
             assert blocks == [set(range(0, 8)), set(range(8, 16))]
 
-    def test_no_fast_backend_is_a_startup_error(self, monkeypatch):
+    def test_structured_tokenization_does_not_require_a_text_backend(self, monkeypatch):
         monkeypatch.setattr(
             token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
         )
-        with patch(_MOCK_TARGET, _FakeTokenizer):  # no backend_tokenizer
-            with pytest.raises(RuntimeError, match="fast"):
-                BatchTokenizer("fake", live_workers=2)
-
-    def test_tiktoken_wrapper_is_supported_by_process_shards(self, monkeypatch):
-        monkeypatch.setattr(
-            token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
-        )
-        monkeypatch.setattr(
-            token_metrics_module, "cgroup_clamped_cpus", lambda: list(range(16))
-        )
-        with patch(_MOCK_TARGET, _FakeTokenizerWithTikTokenModel):
-            with BatchTokenizer("kimi", live_workers=2) as tok:
-                assert len(tok._procs) == 2
-                assert tok._backend is not None
-                assert tok._backend.tokenizer is tok._tokenizer
-                assert encode_lengths(tok._backend, ["a b", "c"]) == [2, 1]
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with BatchTokenizer("fake", live_workers=2) as tok:
+                assert tok._procs == []
+                assert (
+                    tok._token_count_prompt(
+                        ({"role": "user", "content": "one two"},), None
+                    )
+                    == 5
+                )
 
     def test_affinity_unavailable_shards_unpinned(self, monkeypatch):
         """No affinity API (e.g. macOS): shard from the CPU count, unpinned."""
@@ -494,7 +526,7 @@ class TestLiveLane:
     @pytest.mark.asyncio
     async def test_live_never_touches_the_shard_pool(self):
         """Mid-run flushes run in-process; the shards are drain-only."""
-        with patch(_MOCK_TARGET, _FakeTokenizer):
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
             loop = asyncio.get_running_loop()
             with BatchTokenizer("fake", n_workers=0, live_workers=1) as tok:
                 procs = [_RecordingProc(), _RecordingProc(), _RecordingProc()]
@@ -860,18 +892,18 @@ def test_terminate_procs_kills_running_workers():
         assert future.running(), "worker task did not start"
         procs = list((getattr(ex, "_processes", None) or {}).values())
         assert procs, "worker did not spawn"
-        assert not wait_for_process([p.sentinel for p in procs], timeout=0), (
-            "worker exited before termination"
-        )
+        assert not wait_for_process(
+            [p.sentinel for p in procs], timeout=0
+        ), "worker exited before termination"
 
         _terminate_procs([ex])
 
         for p in procs:
             # The executor manager may reap the child concurrently; sentinel
             # readiness observes exit without racing its return-code update.
-            assert wait_for_process([p.sentinel], timeout=5), (
-                "worker was not terminated"
-            )
+            assert wait_for_process(
+                [p.sentinel], timeout=5
+            ), "worker was not terminated"
     finally:
         cleanup_procs = procs or list((getattr(ex, "_processes", None) or {}).values())
         for p in cleanup_procs:

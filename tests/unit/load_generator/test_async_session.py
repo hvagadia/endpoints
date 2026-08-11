@@ -38,7 +38,6 @@ from inference_endpoint.load_generator.session import (
     PhaseResult,
     PhaseType,
     SessionResult,
-    _extract_prompt_text,
 )
 from inference_endpoint.metrics.metric import Throughput
 
@@ -196,6 +195,7 @@ class TestPhaseIssuer:
                             "function": {"name": "lookup", "parameters": {}},
                         }
                     ],
+                    "chat_template_kwargs": {"enable_thinking": False},
                 }
 
         issuer = FakeIssuer()
@@ -208,7 +208,58 @@ class TestPhaseIssuer:
         prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
         assert prompt.messages == tuple(issuer.issued_queries[0].data["messages"])
         assert prompt.tools == tuple(issuer.issued_queries[0].data["tools"])
+        assert prompt.chat_template_kwargs == {"enable_thinking": False}
         assert prompt.text is None
+
+    def test_issue_rejects_multiple_prompt_representations(self):
+        class AmbiguousDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {
+                    "messages": [{"role": "user", "content": "question"}],
+                    "prompt": "question",
+                }
+
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(
+            AmbiguousDataset(1), issuer, publisher, lambda: False
+        )
+
+        with pytest.raises(ValueError, match="multiple prompt representations"):
+            phase_issuer.issue(0)
+
+    def test_issue_empty_messages_falls_through_to_prompt(self):
+        class EmptyMessagesDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {"messages": [], "prompt": "fallback prompt"}
+
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(
+            EmptyMessagesDataset(1), issuer, publisher, lambda: False
+        )
+
+        phase_issuer.issue(0)
+
+        prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
+        assert prompt.messages is None
+        assert prompt.text == "fallback prompt"
+
+    def test_issue_warns_when_no_supported_prompt_representation(self, caplog):
+        class UnsupportedPromptDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {"prompt": [{"type": "image_url"}]}
+
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(
+            UnsupportedPromptDataset(1), issuer, publisher, lambda: False
+        )
+
+        with caplog.at_level("WARNING"):
+            phase_issuer.issue(0)
+
+        assert "no supported prompt representation" in caplog.text
 
     def test_issue_returns_none_when_stopped(self):
         dataset = FakeDataset(5)
@@ -1130,76 +1181,6 @@ class TestSessionResult:
         assert len(sr.perf_results) == 2
         assert len(sr.accuracy_results) == 1
         assert sr.perf_results[0].name == "perf1"
-
-
-@pytest.mark.unit
-class TestExtractPromptText:
-    def test_string_content_extracted(self):
-        messages = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"},
-        ]
-        assert _extract_prompt_text(messages) == "Hello\nHi"
-
-    def test_multimodal_list_content_text_parts_extracted(self):
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image"},
-                    {"type": "image_url"},
-                ],
-            }
-        ]
-        assert _extract_prompt_text(messages) == "Describe this image"
-
-    def test_mixed_string_and_list_content(self):
-        messages = [
-            {"role": "system", "content": "You are helpful"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "What is this?"},
-                    {"type": "image_url"},
-                ],
-            },
-        ]
-        assert _extract_prompt_text(messages) == "You are helpful\nWhat is this?"
-
-    def test_none_content_skipped(self):
-        messages = [
-            {"role": "assistant", "content": None},
-            {"role": "user", "content": "Hello"},
-        ]
-        assert _extract_prompt_text(messages) == "Hello"
-
-    def test_list_content_with_no_text_parts_returns_none(self):
-        messages = [{"role": "user", "content": [{"type": "image_url"}]}]
-        assert _extract_prompt_text(messages) is None
-
-    def test_non_dict_messages_skipped(self):
-        messages = ["not a dict", {"role": "user", "content": "Valid"}]
-        assert _extract_prompt_text(messages) == "Valid"
-
-    def test_tool_calls_included(self):
-        messages = [
-            {"role": "user", "content": "What's the weather?"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "c1",
-                        "type": "function",
-                        "function": {"name": "get_weather", "arguments": "{}"},
-                    }
-                ],
-            },
-        ]
-        result = _extract_prompt_text(messages)
-        assert result is not None
-        assert "What's the weather?" in result
-        assert "get_weather" in result
 
 
 @pytest.mark.unit

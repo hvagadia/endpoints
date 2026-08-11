@@ -21,7 +21,6 @@ See docs/load_generator/DESIGN.md for the full design.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -48,31 +47,6 @@ from .strategy import LoadStrategy, create_load_strategy
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
-
-
-def _extract_prompt_text(messages: list[Any]) -> str | None:
-    """Join text content from an OpenAI messages list; handles list-form multimodal content."""
-    parts: list[str] = []
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-        c = m.get("content")
-        if isinstance(c, str) and c:
-            parts.append(c)
-        elif isinstance(c, list):
-            parts.extend(
-                p["text"]
-                for p in c
-                if isinstance(p, dict)
-                and p.get("type") == "text"
-                and isinstance(p.get("text"), str)
-            )
-        tc = m.get("tool_calls")
-        if tc:
-            parts.append(json.dumps(tc, separators=(",", ":")))
-    return "\n".join(parts) if parts else None
-
-
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
@@ -262,25 +236,58 @@ class PhaseIssuer:
         ts = time.monotonic_ns()
         prompt_data: PromptData
         if isinstance(data, dict):
-            token_ids = data.get("input_tokens") or data.get("token_ids")
-            # Prefer the exact representation sent to the endpoint: existing
-            # token IDs, then structured chat messages, then a plain prompt.
-            # Non-string standalone prompts (for example multimodal content
-            # parts) remain unavailable for ISL reporting.
-            if token_ids is not None:
-                prompt_data = PromptData(token_ids=tuple(token_ids))
-            elif isinstance(data.get("messages"), list | tuple):
+            input_tokens = data.get("input_tokens")
+            token_ids = data.get("token_ids")
+            messages = data.get("messages")
+            prompt = data.get("prompt")
+            representations = [
+                name
+                for name, present in (
+                    ("input_tokens", input_tokens is not None),
+                    ("token_ids", token_ids is not None),
+                    ("messages", isinstance(messages, list | tuple) and bool(messages)),
+                    ("prompt", isinstance(prompt, str)),
+                )
+                if present
+            ]
+            if len(representations) > 1:
+                raise ValueError(
+                    "sample contains multiple prompt representations: "
+                    + ", ".join(representations)
+                )
+
+            if input_tokens is not None or token_ids is not None:
+                selected_token_ids = (
+                    input_tokens if input_tokens is not None else token_ids
+                )
+                prompt_data = PromptData(token_ids=tuple(selected_token_ids))
+            elif isinstance(messages, list | tuple) and messages:
                 tools = data.get("tools")
+                chat_template_kwargs = data.get("chat_template_kwargs")
                 prompt_data = PromptData(
-                    messages=tuple(data["messages"]),
+                    messages=tuple(messages),
                     tools=tuple(tools) if isinstance(tools, list | tuple) else None,
+                    chat_template_kwargs=(
+                        dict(chat_template_kwargs)
+                        if isinstance(chat_template_kwargs, dict)
+                        else None
+                    ),
                 )
+            elif isinstance(prompt, str):
+                prompt_data = PromptData(text=prompt)
             else:
-                prompt_text = data.get("prompt")
-                prompt_data = PromptData(
-                    text=prompt_text if isinstance(prompt_text, str) else None
+                logger.warning(
+                    "Sample %s has no supported prompt representation for ISL; "
+                    "expected token IDs, non-empty messages, or a string prompt",
+                    sample_index,
                 )
+                prompt_data = PromptData()
         else:
+            logger.warning(
+                "Sample %s has no supported prompt representation for ISL; "
+                "expected a mapping",
+                sample_index,
+            )
             prompt_data = PromptData()
         self._publisher.publish(
             EventRecord(

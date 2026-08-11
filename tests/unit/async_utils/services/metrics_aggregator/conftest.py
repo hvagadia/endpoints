@@ -92,6 +92,7 @@ class MockBatchTokenizer:
         messages: tuple[dict, ...],
         tools: tuple[dict, ...] | None,
         _loop: asyncio.AbstractEventLoop,
+        chat_template_kwargs: dict | None = None,
     ) -> int:
         if self._delay:
             await asyncio.sleep(self._delay)

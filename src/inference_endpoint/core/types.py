@@ -294,12 +294,14 @@ class PromptData(
         token_ids: Pre-computed token IDs. Set when the adapter pre-tokenizes (e.g. SGLang).
         messages: Structured messages sent to a chat-completions endpoint.
         tools: Tool declarations accompanying ``messages``.
+        chat_template_kwargs: Model-specific arguments used to render ``messages``.
     """
 
     text: str | None = None
     token_ids: tuple[int, ...] | None = None
     messages: tuple[dict[str, Any], ...] | None = None
     tools: tuple[dict[str, Any], ...] | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
 
 
 class ErrorData(

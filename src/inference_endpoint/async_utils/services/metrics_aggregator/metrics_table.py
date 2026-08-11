@@ -315,17 +315,23 @@ class IslTrigger(TokenTrigger):
         super().__init__(MetricSeriesKey.ISL, registry, queue)
 
     def fire(self, ev_rec, row, pre_change):
-        # Sync fast path: any backend that pre-populates token_ids (e.g. SGLang).
-        if isinstance(ev_rec.data, PromptData) and ev_rec.data.token_ids is not None:
-            self.registry.record(self.metric_name, len(ev_rec.data.token_ids))
-            return
-        if isinstance(ev_rec.data, PromptData) and ev_rec.data.messages is not None:
-            if self._queue is not None:
-                self._queue.enqueue_prompt(
-                    (ev_rec.data.messages, ev_rec.data.tools),
-                    self._make_recorder(ev_rec, pre_change),
-                )
-            return
+        if isinstance(ev_rec.data, PromptData):
+            # Sync fast path: any backend that pre-populates token_ids (e.g. SGLang).
+            if ev_rec.data.token_ids is not None:
+                self.registry.record(self.metric_name, len(ev_rec.data.token_ids))
+                return
+            # Structured chat path: render the complete prompt with its template.
+            if ev_rec.data.messages is not None:
+                if self._queue is not None:
+                    self._queue.enqueue_prompt(
+                        (
+                            ev_rec.data.messages,
+                            ev_rec.data.tools,
+                            ev_rec.data.chat_template_kwargs,
+                        ),
+                        self._make_recorder(ev_rec, pre_change),
+                    )
+                return
         # Text path: tokenize raw prompt text — used when token_ids are
         # unavailable (e.g. OpenAI-compatible endpoints). Enqueued by the base.
         super().fire(ev_rec, row, pre_change)

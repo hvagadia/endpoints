@@ -182,10 +182,15 @@ class TestEventRecordRoundTrip:
             },
         )
         tools = ({"function": {"name": "lookup"}},)
+        chat_template_kwargs = {"enable_thinking": False}
         record = EventRecord(
             event_type=SampleEventType.ISSUED,
             sample_uuid="sample-chat",
-            data=PromptData(messages=messages, tools=tools),
+            data=PromptData(
+                messages=messages,
+                tools=tools,
+                chat_template_kwargs=chat_template_kwargs,
+            ),
         )
 
         _, payload = _codec.encode(record)
@@ -194,6 +199,7 @@ class TestEventRecordRoundTrip:
         assert isinstance(decoded.data, PromptData)
         assert decoded.data.messages == messages
         assert decoded.data.tools == tools
+        assert decoded.data.chat_template_kwargs == chat_template_kwargs
 
     def test_error_event_round_trips_with_error_data(self):
         record = EventRecord(
