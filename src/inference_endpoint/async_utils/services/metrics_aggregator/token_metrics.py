@@ -43,6 +43,13 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import msgspec
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    MessageInput,
+    PromptInput,
+    TextInput,
+    TokenIdsInput,
+    TokenizationInput,
+)
 from inference_endpoint.endpoint_client.cpu_affinity import (
     cgroup_clamped_cpus,
 )
@@ -259,9 +266,8 @@ def _even_chunks(items: list[str], n: int) -> list[list[str]]:
 class BatchTokenizer:
     """Counts tokens for batches of text, sharded across pinned CPU cores.
 
-    ``count_texts_async`` tokenizes a whole list in one sharded call. The
-    chat-template ``token_count_message_async`` path runs on a small in-process
-    thread — rare (tool calls) relative to the batched OSL/ISL/TPOT flush.
+    ``count_batch_async`` explicitly routes token IDs, text, assistant
+    messages, and complete prompts to their corresponding counting path.
     """
 
     def __init__(
@@ -415,7 +421,7 @@ class BatchTokenizer:
             )
         return encode_lengths(backend, texts)
 
-    async def count_texts_async(
+    async def _count_texts_async(
         self,
         texts: list[str],
         loop: asyncio.AbstractEventLoop,
@@ -494,21 +500,6 @@ class BatchTokenizer:
             ]
             return self._token_count_text("\n".join(parts))
 
-    async def token_count_message_async(
-        self,
-        content: str,
-        reasoning: str | None,
-        tool_calls: tuple[dict[str, Any], ...] | None,
-        loop: asyncio.AbstractEventLoop,
-        /,
-    ) -> int:
-        """Chat-template message token count without blocking the loop."""
-        if self._thread is None:
-            raise RuntimeError("BatchTokenizer is closed")
-        return await loop.run_in_executor(
-            self._thread, self._token_count_message, content, reasoning, tool_calls
-        )
-
     def _token_count_prompt(
         self,
         messages: tuple[dict[str, Any], ...],
@@ -545,24 +536,72 @@ class BatchTokenizer:
             )
         return len(encoded)
 
-    async def token_count_prompt_async(
+    async def count_batch_async(
         self,
-        messages: tuple[dict[str, Any], ...],
-        tools: tuple[dict[str, Any], ...] | None,
+        inputs: list[TokenizationInput],
         loop: asyncio.AbstractEventLoop,
         /,
-        chat_template_kwargs: dict[str, Any] | None = None,
-    ) -> int:
-        """Complete chat-prompt token count without blocking the loop."""
-        if self._thread is None:
-            raise RuntimeError("BatchTokenizer is closed")
-        return await loop.run_in_executor(
-            self._thread,
-            self._token_count_prompt,
-            messages,
-            tools,
-            chat_template_kwargs,
-        )
+        *,
+        live: bool = False,
+    ) -> list[int | Exception]:
+        """Count a mixed batch while preserving input order."""
+        outcomes: list[int | Exception | None] = [None] * len(inputs)
+        text_indices: list[int] = []
+        texts: list[str] = []
+        structured: list[tuple[int, MessageInput | PromptInput]] = []
+
+        for index, item in enumerate(inputs):
+            if isinstance(item, TokenIdsInput):
+                outcomes[index] = len(item.token_ids)
+            elif isinstance(item, TextInput):
+                text_indices.append(index)
+                texts.append(item.text)
+            elif isinstance(item, MessageInput):
+                structured.append((index, item))
+            elif isinstance(item, PromptInput):
+                structured.append((index, item))
+
+        if texts:
+            try:
+                counts = await self._count_texts_async(texts, loop, live=live)
+                if len(counts) != len(texts):
+                    raise RuntimeError(
+                        f"tokenizer returned {len(counts)} counts for "
+                        f"{len(texts)} texts"
+                    )
+                for index, count in zip(text_indices, counts, strict=True):
+                    outcomes[index] = count
+            except Exception as exc:  # noqa: BLE001 - isolate this input kind.
+                for index in text_indices:
+                    outcomes[index] = exc
+
+        for index, item in structured:
+            if self._thread is None:
+                outcomes[index] = RuntimeError("BatchTokenizer is closed")
+                continue
+            try:
+                if isinstance(item, MessageInput):
+                    outcomes[index] = await loop.run_in_executor(
+                        self._thread,
+                        self._token_count_message,
+                        item.content,
+                        item.reasoning,
+                        item.tool_calls,
+                    )
+                elif isinstance(item, PromptInput):
+                    outcomes[index] = await loop.run_in_executor(
+                        self._thread,
+                        self._token_count_prompt,
+                        item.messages,
+                        item.tools,
+                        item.chat_template_kwargs,
+                    )
+            except Exception as exc:  # noqa: BLE001 - isolate this input.
+                outcomes[index] = exc
+
+        if any(outcome is None for outcome in outcomes):
+            raise AssertionError("unhandled TokenizationInput variant")
+        return cast(list[int | Exception], outcomes)
 
     def close(self) -> None:
         """Shut down all workers. Idempotent.
@@ -586,16 +625,6 @@ class BatchTokenizer:
         self.close()
 
 
-# Message means the structured assistant output used for OSL/TPOT tokenization.
-MessageParts = tuple[str, str | None, tuple[dict[str, Any], ...] | None]
-# Prompt means the complete chat input and tool definitions used for ISL.
-PromptParts = tuple[
-    tuple[dict[str, Any], ...],
-    tuple[dict[str, Any], ...] | None,
-    dict[str, Any] | None,
-]
-
-
 class TokenCounter(Protocol):
     """The async tokenization surface ``TokenBatchQueue`` depends on.
 
@@ -604,38 +633,16 @@ class TokenCounter(Protocol):
     tokenizer and test doubles type-check without inheritance.
     """
 
-    async def count_texts_async(
+    async def count_batch_async(
         self,
-        texts: list[str],
+        inputs: list[TokenizationInput],
         loop: asyncio.AbstractEventLoop,
         /,
         *,
         live: bool = False,
-    ) -> list[int]:
-        """Per-text token counts (``live=True`` = the bounded mid-run lane)."""
-        raise NotImplementedError
-
-    async def token_count_message_async(
-        self,
-        content: str,
-        reasoning: str | None,
-        tool_calls: tuple[dict[str, Any], ...] | None,
-        loop: asyncio.AbstractEventLoop,
-        /,
-    ) -> int:
-        """Chat-template token count for one assistant message."""
-        raise NotImplementedError
-
-    async def token_count_prompt_async(
-        self,
-        messages: tuple[dict[str, Any], ...],
-        tools: tuple[dict[str, Any], ...] | None,
-        loop: asyncio.AbstractEventLoop,
-        /,
-        chat_template_kwargs: dict[str, Any] | None = None,
-    ) -> int:
-        """Chat-template token count for one complete input prompt."""
-        raise NotImplementedError
+    ) -> list[int | Exception]:
+        """Return one count or error per input, in input order."""
+        ...
 
 
 class TokenBatchQueue:
@@ -658,9 +665,7 @@ class TokenBatchQueue:
     ) -> None:
         self._tokenizer = tokenizer
         self._loop = loop
-        self._text: list[tuple[str, Callable[[int], None]]] = []
-        self._msg: list[tuple[MessageParts, Callable[[int], None]]] = []
-        self._prompt: list[tuple[PromptParts, Callable[[int], None]]] = []
+        self._items: list[tuple[TokenizationInput, Callable[[int], None]]] = []
         self._inflight = 0
         self._live_task: asyncio.Task | None = None
         # Serializes flushes so the periodic live flush and the end-of-run
@@ -699,21 +704,9 @@ class TokenBatchQueue:
         """Enqueued items not yet tokenized-and-recorded."""
         return self._inflight
 
-    def enqueue_text(self, text: str, on_count: Callable[[int], None]) -> None:
+    def enqueue(self, item: TokenizationInput, on_count: Callable[[int], None]) -> None:
         self._inflight += 1
-        self._text.append((text, on_count))
-
-    def enqueue_message(
-        self, parts: MessageParts, on_count: Callable[[int], None]
-    ) -> None:
-        self._inflight += 1
-        self._msg.append((parts, on_count))
-
-    def enqueue_prompt(
-        self, parts: PromptParts, on_count: Callable[[int], None]
-    ) -> None:
-        self._inflight += 1
-        self._prompt.append((parts, on_count))
+        self._items.append((item, on_count))
 
     async def flush_live_once(self) -> None:
         """One bounded mid-run flush (live lane).
@@ -743,99 +736,56 @@ class TokenBatchQueue:
         in the next flush. Callers use ``flush_live_once`` / ``drain_all``.
         """
         async with self._lock:
-            if not (self._text or self._msg or self._prompt):
+            if not self._items:
                 return
             if live:
-                cap = _LIVE_FLUSH_MAX_ITEMS
-                text_items = self._text[:cap]
-                del self._text[:cap]  # in-place: O(cap), not O(backlog).
-                msg_items = self._msg[:cap]
-                del self._msg[:cap]
-                prompt_items = self._prompt[:cap]
-                del self._prompt[:cap]
-            else:
-                text_items, self._text = self._text, []
-                msg_items, self._msg = self._msg, []
-                prompt_items, self._prompt = self._prompt, []
-            # The text and message phases fail independently — they run on
-            # separate executors, so a dead text shard must not drop message
-            # items that would still succeed (and vice versa). The first
-            # failure is re-raised after both phases so callers still see it.
-            failure: Exception | None = None
-            if text_items:
-                try:
-                    counts = await self._tokenizer.count_texts_async(
-                        [t for t, _ in text_items], self._loop, live=live
-                    )
-                except asyncio.CancelledError:
-                    if live:
-                        self._text[:0] = text_items
-                        self._msg[:0] = msg_items
-                        self._prompt[:0] = prompt_items
-                    raise
-                except Exception as exc:  # noqa: BLE001 — isolate phases.
-                    failure = exc
-                    if live:
-                        # A live hiccup must not lose samples: give the items
-                        # back so the end-of-run drain (full pool) retries.
-                        # Drain failures are terminal and stay pending-only.
-                        self._text[:0] = text_items
-                else:
-                    if len(counts) != len(text_items):
-                        # Tokenizer contract violation (wrong-length result).
-                        # Treat it like any other text-phase failure so the
-                        # message phase still runs: re-queue live items, leave
-                        # drain items pending (terminal), re-raise after both.
-                        failure = RuntimeError(
-                            f"tokenizer returned {len(counts)} counts for "
-                            f"{len(text_items)} texts"
-                        )
-                        if live:
-                            self._text[:0] = text_items
+                selected: list[tuple[TokenizationInput, Callable[[int], None]]] = []
+                remaining: list[tuple[TokenizationInput, Callable[[int], None]]] = []
+                selected_by_type: dict[type, int] = {}
+                for queued in self._items:
+                    item_type = type(queued[0])
+                    count = selected_by_type.get(item_type, 0)
+                    if count < _LIVE_FLUSH_MAX_ITEMS:
+                        selected.append(queued)
+                        selected_by_type[item_type] = count + 1
                     else:
-                        for (_, on_count), count in zip(
-                            text_items, counts, strict=False
-                        ):
-                            self._record(on_count, count)
-            for i, ((content, reasoning, tool_calls), on_count) in enumerate(msg_items):
-                try:
-                    count = await self._tokenizer.token_count_message_async(
-                        content, reasoning, tool_calls, self._loop
-                    )
-                except asyncio.CancelledError:
-                    if live:
-                        self._msg[:0] = msg_items[i:]
-                        self._prompt[:0] = prompt_items
-                    raise
-                except Exception as exc:  # noqa: BLE001 — isolate items.
-                    failure = failure or exc
-                    if live:
-                        self._msg.append(((content, reasoning, tool_calls), on_count))
-                    continue
-                self._record(on_count, count)
-            for i, (
-                (messages, tools, chat_template_kwargs),
-                on_count,
-            ) in enumerate(prompt_items):
-                try:
-                    count = await self._tokenizer.token_count_prompt_async(
-                        messages,
-                        tools,
-                        self._loop,
-                        chat_template_kwargs=chat_template_kwargs,
-                    )
-                except asyncio.CancelledError:
-                    if live:
-                        self._prompt[:0] = prompt_items[i:]
-                    raise
-                except Exception as exc:  # noqa: BLE001 — isolate items.
-                    failure = failure or exc
-                    if live:
-                        self._prompt.append(
-                            ((messages, tools, chat_template_kwargs), on_count)
-                        )
-                    continue
-                self._record(on_count, count)
+                        remaining.append(queued)
+                items = selected
+                self._items = remaining
+            else:
+                items, self._items = self._items, []
+
+            try:
+                outcomes = await self._tokenizer.count_batch_async(
+                    [item for item, _ in items], self._loop, live=live
+                )
+            except asyncio.CancelledError:
+                if live:
+                    self._items[:0] = items
+                raise
+            except Exception:
+                if live:
+                    self._items[:0] = items
+                raise
+
+            if len(outcomes) != len(items):
+                if live:
+                    self._items[:0] = items
+                raise RuntimeError(
+                    f"tokenizer returned {len(outcomes)} outcomes for "
+                    f"{len(items)} inputs"
+                )
+
+            failure: Exception | None = None
+            retry: list[tuple[TokenizationInput, Callable[[int], None]]] = []
+            for queued, outcome in zip(items, outcomes, strict=True):
+                if isinstance(outcome, Exception):
+                    failure = failure or outcome
+                    retry.append(queued)
+                else:
+                    self._record(queued[1], outcome)
+            if live and retry:
+                self._items[:0] = retry
             if failure is not None:
                 raise failure
 

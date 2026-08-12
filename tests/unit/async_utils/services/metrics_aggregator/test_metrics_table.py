@@ -37,6 +37,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     TokenBatchQueue,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.tokenization import (
+    MessageInput,
+)
 from inference_endpoint.core.record import (
     EventRecord,
     SampleEventType,
@@ -365,14 +368,12 @@ class TestOslTriggerToolCalls:
             def __init__(self):
                 self.messages = []
 
-            async def count_texts_async(self, *args, **kwargs):
-                raise AssertionError("reasoning output must not use flattened text")
-
-            async def token_count_message_async(
-                self, content, reasoning, tool_calls, _loop
-            ):
-                self.messages.append((content, reasoning, tool_calls))
-                return 4
+            async def count_batch_async(self, inputs, _loop, live=False):
+                assert all(isinstance(item, MessageInput) for item in inputs)
+                self.messages.extend(
+                    (item.content, item.reasoning, item.tool_calls) for item in inputs
+                )
+                return [4] * len(inputs)
 
         registry = MetricsRegistry()
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)

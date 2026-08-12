@@ -1203,10 +1203,7 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class FailingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop, live=False):
-                raise RuntimeError("tokenizer backend died")
-
-            async def token_count_message_async(self, *args):
+            async def count_batch_async(self, inputs, _loop, live=False):
                 raise RuntimeError("tokenizer backend died")
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
@@ -1250,13 +1247,9 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class BlockingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop, live=False):
+            async def count_batch_async(self, inputs, _loop, live=False):
                 await asyncio.sleep(10.0)  # exceeds drain timeout
-                return [0] * len(texts)
-
-            async def token_count_message_async(self, *args):
-                await asyncio.sleep(10.0)
-                return 0
+                return [0] * len(inputs)
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, _, publisher = make_aggregator(
