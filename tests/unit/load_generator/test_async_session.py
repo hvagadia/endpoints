@@ -260,7 +260,7 @@ class TestPhaseIssuer:
         assert prompt.messages is None
         assert prompt.text == "fallback prompt"
 
-    def test_issue_warns_once_for_list_prompt_without_isl_representation(self, caplog):
+    def test_issue_list_prompt_without_isl_representation_does_not_warn(self, caplog):
         class UnsupportedPromptDataset(FakeDataset):
             def load_sample(self, index: int) -> dict:
                 return {"prompt": [{"type": "image_url"}]}
@@ -275,12 +275,7 @@ class TestPhaseIssuer:
             phase_issuer.issue(0)
             phase_issuer.issue(1)
 
-        warnings = [
-            record
-            for record in caplog.records
-            if "List-form prompts are issued normally" in record.message
-        ]
-        assert len(warnings) == 1
+        assert not caplog.records
 
     def test_issue_warns_once_for_non_mapping_sample(self, caplog):
         class NonMappingDataset(FakeDataset):

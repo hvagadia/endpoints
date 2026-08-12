@@ -276,12 +276,7 @@ class PhaseIssuer:
             elif isinstance(prompt, str):
                 prompt_data = PromptData(text=prompt)
             else:
-                if isinstance(prompt, list):
-                    self._warn_prompt_once(
-                        "list_prompt",
-                        "List-form prompts are issued normally, but ISL is unavailable",
-                    )
-                else:
+                if not isinstance(prompt, list):
                     self._warn_prompt_once(
                         "unsupported_mapping",
                         "Samples without token IDs, non-empty messages, or a string "
