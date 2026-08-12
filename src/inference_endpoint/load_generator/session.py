@@ -155,6 +155,7 @@ class PhaseIssuer:
         "_issuer",
         "_on_inflight_drained",
         "_performance_tracking_stopped",
+        "_prompt_warning_reasons",
         "_publisher",
         "_stop_check",
         "uuid_to_index",
@@ -183,6 +184,14 @@ class PhaseIssuer:
         self.inflight: int = 0
         self.issued_count: int = 0
         self._performance_tracking_stopped = False
+        self._prompt_warning_reasons: set[str] = set()
+
+    def _warn_prompt_once(self, reason: str, message: str) -> None:
+        """Warn once per phase when ISL cannot be derived from a sample."""
+        if reason in self._prompt_warning_reasons:
+            return
+        self._prompt_warning_reasons.add(reason)
+        logger.warning(message)
 
     def mark_inflight_complete(self) -> None:
         self.inflight -= 1
@@ -240,27 +249,13 @@ class PhaseIssuer:
             token_ids = data.get("token_ids")
             messages = data.get("messages")
             prompt = data.get("prompt")
-            representations = [
-                name
-                for name, present in (
-                    ("input_tokens", input_tokens is not None),
-                    ("token_ids", token_ids is not None),
-                    ("messages", isinstance(messages, list | tuple) and bool(messages)),
-                    ("prompt", isinstance(prompt, str)),
-                )
-                if present
-            ]
-            if len(representations) > 1:
-                raise ValueError(
-                    "sample contains multiple prompt representations: "
-                    + ", ".join(representations)
-                )
+            if input_tokens is not None and token_ids is not None:
+                raise ValueError("sample contains both input_tokens and token_ids")
 
-            if input_tokens is not None or token_ids is not None:
-                selected_token_ids = (
-                    input_tokens if input_tokens is not None else token_ids
-                )
-                prompt_data = PromptData(token_ids=tuple(selected_token_ids))
+            if input_tokens is not None:
+                prompt_data = PromptData(token_ids=tuple(input_tokens))
+            elif token_ids is not None:
+                prompt_data = PromptData(token_ids=tuple(token_ids))
             elif isinstance(messages, list | tuple) and messages:
                 tools = data.get("tools")
                 chat_template_kwargs = data.get("chat_template_kwargs")
@@ -281,17 +276,22 @@ class PhaseIssuer:
             elif isinstance(prompt, str):
                 prompt_data = PromptData(text=prompt)
             else:
-                logger.warning(
-                    "Sample %s has no supported prompt representation for ISL; "
-                    "expected token IDs, non-empty messages, or a string prompt",
-                    sample_index,
-                )
+                if isinstance(prompt, list):
+                    self._warn_prompt_once(
+                        "list_prompt",
+                        "List-form prompts are issued normally, but ISL is unavailable",
+                    )
+                else:
+                    self._warn_prompt_once(
+                        "unsupported_mapping",
+                        "Samples without token IDs, non-empty messages, or a string "
+                        "prompt are issued normally, but ISL is unavailable",
+                    )
                 prompt_data = PromptData()
         else:
-            logger.warning(
-                "Sample %s has no supported prompt representation for ISL; "
-                "expected a mapping",
-                sample_index,
+            self._warn_prompt_once(
+                "non_mapping",
+                "Non-mapping samples are issued normally, but ISL is unavailable",
             )
             prompt_data = PromptData()
         self._publisher.publish(

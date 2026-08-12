@@ -213,21 +213,34 @@ class TestPhaseIssuer:
         assert prompt.chat_template_kwargs == {"enable_thinking": False}
         assert prompt.text is None
 
-    def test_issue_rejects_multiple_prompt_representations(self):
-        class AmbiguousDataset(FakeDataset):
+    def test_issue_messages_take_precedence_over_prompt(self):
+        class MessagesDataset(FakeDataset):
             def load_sample(self, index: int) -> dict:
                 return {
                     "messages": [{"role": "user", "content": "question"}],
-                    "prompt": "question",
+                    "prompt": "generic fallback",
                 }
 
         issuer = FakeIssuer()
         publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(MessagesDataset(1), issuer, publisher, lambda: False)
+
+        phase_issuer.issue(0)
+
+        prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
+        assert prompt.messages == ({"role": "user", "content": "question"},)
+        assert prompt.text is None
+
+    def test_issue_rejects_both_token_id_fields(self):
+        class ConflictingTokensDataset(FakeDataset):
+            def load_sample(self, index: int) -> dict:
+                return {"input_tokens": [1, 2], "token_ids": [3, 4]}
+
         phase_issuer = PhaseIssuer(
-            AmbiguousDataset(1), issuer, publisher, lambda: False
+            ConflictingTokensDataset(1), FakeIssuer(), FakePublisher(), lambda: False
         )
 
-        with pytest.raises(ValueError, match="multiple prompt representations"):
+        with pytest.raises(ValueError, match="both input_tokens and token_ids"):
             phase_issuer.issue(0)
 
     def test_issue_empty_messages_falls_through_to_prompt(self):
@@ -247,7 +260,7 @@ class TestPhaseIssuer:
         assert prompt.messages is None
         assert prompt.text == "fallback prompt"
 
-    def test_issue_warns_when_no_supported_prompt_representation(self, caplog):
+    def test_issue_warns_once_for_list_prompt_without_isl_representation(self, caplog):
         class UnsupportedPromptDataset(FakeDataset):
             def load_sample(self, index: int) -> dict:
                 return {"prompt": [{"type": "image_url"}]}
@@ -255,13 +268,39 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         publisher = FakePublisher()
         phase_issuer = PhaseIssuer(
-            UnsupportedPromptDataset(1), issuer, publisher, lambda: False
+            UnsupportedPromptDataset(2), issuer, publisher, lambda: False
         )
 
         with caplog.at_level("WARNING"):
             phase_issuer.issue(0)
+            phase_issuer.issue(1)
 
-        assert "no supported prompt representation" in caplog.text
+        warnings = [
+            record
+            for record in caplog.records
+            if "List-form prompts are issued normally" in record.message
+        ]
+        assert len(warnings) == 1
+
+    def test_issue_warns_once_for_non_mapping_sample(self, caplog):
+        class NonMappingDataset(FakeDataset):
+            def load_sample(self, index: int):
+                return ["prompt"]
+
+        phase_issuer = PhaseIssuer(
+            NonMappingDataset(2), FakeIssuer(), FakePublisher(), lambda: False
+        )
+
+        with caplog.at_level("WARNING"):
+            phase_issuer.issue(0)
+            phase_issuer.issue(1)
+
+        warnings = [
+            record
+            for record in caplog.records
+            if "Non-mapping samples are issued normally" in record.message
+        ]
+        assert len(warnings) == 1
 
     def test_issue_returns_none_when_stopped(self):
         dataset = FakeDataset(5)
