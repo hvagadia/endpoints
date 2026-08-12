@@ -955,18 +955,18 @@ def test_terminate_procs_kills_running_workers():
         assert future.running(), "worker task did not start"
         procs = list((getattr(ex, "_processes", None) or {}).values())
         assert procs, "worker did not spawn"
-        assert not wait_for_process([p.sentinel for p in procs], timeout=0), (
-            "worker exited before termination"
-        )
+        assert not wait_for_process(
+            [p.sentinel for p in procs], timeout=0
+        ), "worker exited before termination"
 
         _terminate_procs([ex])
 
         for p in procs:
             # The executor manager may reap the child concurrently; sentinel
             # readiness observes exit without racing its return-code update.
-            assert wait_for_process([p.sentinel], timeout=5), (
-                "worker was not terminated"
-            )
+            assert wait_for_process(
+                [p.sentinel], timeout=5
+            ), "worker was not terminated"
     finally:
         cleanup_procs = procs or list((getattr(ex, "_processes", None) or {}).values())
         for p in cleanup_procs:
