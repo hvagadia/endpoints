@@ -299,6 +299,7 @@ class PromptData(
         messages: Structured messages sent to a chat-completions endpoint.
         tools: Tool declarations accompanying ``messages``.
         chat_template_kwargs: Model-specific arguments used to render ``messages``.
+        chat_template: Per-request template used to render ``messages``.
     """
 
     text: str | None = None
@@ -306,6 +307,7 @@ class PromptData(
     messages: tuple[dict[str, Any], ...] | None = None
     tools: tuple[dict[str, Any], ...] | None = None
     chat_template_kwargs: dict[str, Any] | None = None
+    chat_template: str | None = None
 
 
 class ErrorData(

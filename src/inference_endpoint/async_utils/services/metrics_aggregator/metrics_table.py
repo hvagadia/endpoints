@@ -311,6 +311,7 @@ class IslTrigger(TokenTrigger):
                 ev_rec.data.messages,
                 ev_rec.data.tools,
                 ev_rec.data.chat_template_kwargs,
+                ev_rec.data.chat_template,
             )
         return None
 

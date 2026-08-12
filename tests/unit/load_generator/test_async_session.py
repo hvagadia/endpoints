@@ -195,6 +195,7 @@ class TestPhaseIssuer:
                             "function": {"name": "lookup", "parameters": {}},
                         }
                     ],
+                    "chat_template": "custom template",
                     "chat_template_kwargs": {"enable_thinking": False},
                 }
 
@@ -208,6 +209,7 @@ class TestPhaseIssuer:
         prompt = publisher.events_of_type(SampleEventType.ISSUED)[0].data
         assert prompt.messages == tuple(issuer.issued_queries[0].data["messages"])
         assert prompt.tools == tuple(issuer.issued_queries[0].data["tools"])
+        assert prompt.chat_template == "custom template"
         assert prompt.chat_template_kwargs == {"enable_thinking": False}
         assert prompt.text is None
 

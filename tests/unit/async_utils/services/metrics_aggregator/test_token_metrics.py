@@ -50,7 +50,7 @@ def test_tokenization_inputs_make_the_four_paths_explicit():
     assert TokenIdsInput((1, 2)).token_ids == (1, 2)
     assert TextInput("hello").text == "hello"
     assert MessageInput("answer", "thought", None).reasoning == "thought"
-    assert PromptInput(({"role": "user", "content": "hi"},), None, None).messages
+    assert PromptInput(({"role": "user", "content": "hi"},), None, None, None).messages
 
 
 class _FakeTokenizer:
@@ -65,6 +65,10 @@ class _FakeTokenizer:
 
     def tokenize(self, text: str) -> list[str]:
         return text.split()
+
+    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+        assert add_special_tokens is False
+        return list(range(len(text.split())))
 
     @classmethod
     def from_pretrained(cls, name: str, **kwargs: object) -> "_FakeTokenizer":
@@ -114,14 +118,14 @@ class TestBatchTokenizer:
                 assert await tok._count_texts_async([], loop) == []
 
     @pytest.mark.asyncio
-    async def test_plain_text_requires_a_text_backend(self):
+    async def test_plain_text_falls_back_to_tokenizer_encode_without_backend(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
-                with pytest.raises(
-                    RuntimeError, match="plain-text tokenization.*backend"
-                ):
-                    await tok._count_texts_async(["Hello world"], loop)
+                counts = await tok._count_texts_async(
+                    ["Hello world", "one two three"], loop
+                )
+                assert counts == [2, 3]
 
     @pytest.mark.asyncio
     async def test_count_texts_async_sharded(self):
@@ -240,7 +244,7 @@ class TestBatchTokenizerMessageTokenization:
 
                 count = (
                     await tok.count_batch_async(
-                        [PromptInput(messages, tools, None)], loop
+                        [PromptInput(messages, tools, None, None)], loop
                     )
                 )[0]
 
@@ -371,6 +375,7 @@ class TestBatchTokenizerMessageTokenization:
                     messages,
                     None,
                     {"enable_thinking": False},
+                    "custom template",
                 )
 
         normalized_call = _RecordingTokenizer.last_messages[0]["tool_calls"][0]
@@ -379,6 +384,7 @@ class TestBatchTokenizerMessageTokenization:
             '{"city": "SF"}'
         )
         assert _RecordingTokenizer.last_kwargs["enable_thinking"] is False
+        assert _RecordingTokenizer.last_kwargs["chat_template"] == "custom template"
         assert _RecordingTokenizer.last_kwargs["return_dict"] is False
 
 
@@ -461,7 +467,12 @@ async def test_count_batch_routes_all_four_inputs_and_preserves_order():
                     TokenIdsInput((1, 2, 3)),
                     TextInput("plain text"),
                     MessageInput("answer here", None, None),
-                    PromptInput(({"role": "user", "content": "ask now"},), None, None),
+                    PromptInput(
+                        ({"role": "user", "content": "ask now"},),
+                        None,
+                        None,
+                        None,
+                    ),
                 ],
                 loop,
             )

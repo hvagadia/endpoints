@@ -331,8 +331,8 @@ class BatchTokenizer:
             return
         if self._text_backend is None:
             logger.info(
-                "BatchTokenizer: no plain-text backend for %s; structured "
-                "chat tokenization remains available",
+                "BatchTokenizer: no fast backend for %s; using the tokenizer "
+                "wrapper for in-process plain-text tokenization",
                 self._tokenizer_name,
             )
             return
@@ -392,12 +392,12 @@ class BatchTokenizer:
 
     def _encode_lengths_inproc(self, texts: list[str]) -> list[int]:
         backend = self._text_backend
-        if backend is None:
-            raise RuntimeError(
-                f"plain-text tokenization for {self._tokenizer_name!r} requires "
-                "a supported fast backend"
-            )
-        return encode_lengths(backend, texts)
+        if backend is not None:
+            return encode_lengths(backend, texts)
+        tokenizer = self._tokenizer
+        if tokenizer is None:
+            raise RuntimeError("BatchTokenizer is closed")
+        return [len(tokenizer.encode(text, add_special_tokens=False)) for text in texts]
 
     async def _count_texts_async(
         self,
@@ -483,6 +483,7 @@ class BatchTokenizer:
         messages: tuple[dict[str, Any], ...],
         tools: tuple[dict[str, Any], ...] | None,
         chat_template_kwargs: dict[str, Any] | None = None,
+        chat_template: str | None = None,
     ) -> int:
         kwargs = dict(chat_template_kwargs or {})
         kwargs.update(
@@ -492,6 +493,8 @@ class BatchTokenizer:
         )
         if tools is not None:
             kwargs["tools"] = list(tools)
+        if chat_template is not None:
+            kwargs["chat_template"] = chat_template
         prompt_messages = _normalize_prompt_messages_for_template(messages)
         try:
             encoded = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
@@ -572,6 +575,7 @@ class BatchTokenizer:
                         item.messages,
                         item.tools,
                         item.chat_template_kwargs,
+                        item.chat_template,
                     )
             except Exception as exc:  # noqa: BLE001 - isolate this input.
                 outcomes[index] = exc
