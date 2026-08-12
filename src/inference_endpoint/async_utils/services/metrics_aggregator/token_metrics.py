@@ -190,7 +190,7 @@ def encode_lengths(backend: Any, texts: list[str]) -> list[int]:
     """Per-text token counts via one bounded backend batch call."""
     encode_batch = getattr(backend, "encode_batch_fast", None) or backend.encode_batch
     encoded = encode_batch(texts, add_special_tokens=False)
-    return [len(getattr(item, "ids", item)) for item in encoded]
+    return [len(item.ids) for item in encoded]
 
 
 def _worker_encode_lengths(texts: list[str]) -> list[int]:
@@ -261,6 +261,7 @@ class BatchTokenizer:
         os.environ.setdefault("RAYON_NUM_THREADS", str(max(1, live_workers)))
         self._fallback_warned: set[str] = set()
         self._tokenizer: PreTrainedTokenizerBase | None = None
+        self._text_backend: Any | None = None
         self._prefix_len = 0
         self._baseline = 0
         # In-process threads: the live token-metric lane plus the
