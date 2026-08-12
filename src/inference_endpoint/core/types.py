@@ -284,6 +284,10 @@ class PromptData(
 ):  # type: ignore[call-arg]
     """Prompt input data attached to ISSUED events for ISL computation.
 
+    AT-RISK (gc=False): Has mutable container fields ``messages``, ``tools``,
+    and ``chat_template_kwargs``. Any change that introduces cyclic references
+    must be audited; if cycles become possible, remove ``gc=False``.
+
     Exactly one of ``text``, ``token_ids``, or ``messages`` should be set:
     - ``text``: raw prompt string (OpenAI path) — requires tokenization for ISL.
     - ``token_ids``: pre-tokenized token ID list (SGLang/Harmonize path) — ISL is len().

@@ -111,29 +111,6 @@ def _normalize_tool_calls_for_template(
     return normalized
 
 
-def _text_only_multimodal_messages(
-    messages: tuple[dict[str, Any], ...] | list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], bool]:
-    """Replace multimodal content parts with their text for text-only templates."""
-    normalized: list[dict[str, Any]] = []
-    changed = False
-    for message in messages:
-        content = message.get("content")
-        if not isinstance(content, list):
-            normalized.append(message)
-            continue
-        changed = True
-        text = " ".join(
-            part["text"]
-            for part in content
-            if isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
-        )
-        normalized.append({**message, "content": text})
-    return normalized, changed
-
-
 def _normalize_prompt_messages_for_template(
     messages: tuple[dict[str, Any], ...],
 ) -> list[dict[str, Any]]:
@@ -519,22 +496,21 @@ class BatchTokenizer:
             encoded = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
                 prompt_messages, **kwargs
             )
-        except Exception:
-            text_only_messages, changed = _text_only_multimodal_messages(messages)
-            if not changed:
-                raise
-            key = f"{self._tokenizer_name}:multimodal-prompt"
+            return len(encoded)
+        except Exception as exc:
+            key = f"{self._tokenizer_name}:{type(exc).__name__}"
             if key not in self._fallback_warned:
                 self._fallback_warned.add(key)
-                logger.warning(
-                    "Chat template for %s rejected multimodal messages; "
-                    "retrying with text content only",
+                logger.exception(
+                    "apply_chat_template failed for %s (%s); falling back to "
+                    "whitespace tokenization. Structured ISL may diverge.",
                     self._tokenizer_name,
+                    type(exc).__name__,
                 )
-            encoded = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
-                text_only_messages, **kwargs
-            )
-        return len(encoded)
+            prompt = {"messages": prompt_messages}
+            if tools is not None:
+                prompt["tools"] = list(tools)
+            return self._token_count_text(msgspec.json.encode(prompt).decode())
 
     async def count_batch_async(
         self,
