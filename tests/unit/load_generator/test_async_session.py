@@ -143,7 +143,9 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         issuer._auto_respond = False
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(
+            dataset, issuer, publisher, lambda: False, routing_headers=()
+        )
 
         result = phase_issuer.issue(3)
         assert result is not None
@@ -203,7 +205,9 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         issuer._auto_respond = False
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(ChatDataset(1), issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(
+            ChatDataset(1), issuer, publisher, lambda: False, routing_headers=()
+        )
 
         phase_issuer.issue(0, conversation_id="conv-1", turn=2)
 
@@ -225,7 +229,9 @@ class TestPhaseIssuer:
 
         issuer = FakeIssuer()
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(MessagesDataset(1), issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(
+            MessagesDataset(1), issuer, publisher, lambda: False, routing_headers=()
+        )
 
         phase_issuer.issue(0)
 
@@ -239,7 +245,11 @@ class TestPhaseIssuer:
                 return {"input_tokens": [1, 2], "token_ids": [3, 4]}
 
         phase_issuer = PhaseIssuer(
-            ConflictingTokensDataset(1), FakeIssuer(), FakePublisher(), lambda: False
+            ConflictingTokensDataset(1),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            routing_headers=(),
         )
 
         with pytest.raises(ValueError, match="both input_tokens and token_ids"):
@@ -253,7 +263,11 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         publisher = FakePublisher()
         phase_issuer = PhaseIssuer(
-            EmptyMessagesDataset(1), issuer, publisher, lambda: False
+            EmptyMessagesDataset(1),
+            issuer,
+            publisher,
+            lambda: False,
+            routing_headers=(),
         )
 
         phase_issuer.issue(0)
@@ -270,7 +284,11 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         publisher = FakePublisher()
         phase_issuer = PhaseIssuer(
-            UnsupportedPromptDataset(2), issuer, publisher, lambda: False
+            UnsupportedPromptDataset(2),
+            issuer,
+            publisher,
+            lambda: False,
+            routing_headers=(),
         )
 
         with caplog.at_level("WARNING"):
@@ -285,7 +303,11 @@ class TestPhaseIssuer:
                 return ["prompt"]
 
         phase_issuer = PhaseIssuer(
-            NonMappingDataset(2), FakeIssuer(), FakePublisher(), lambda: False
+            NonMappingDataset(2),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: False,
+            routing_headers=(),
         )
 
         with caplog.at_level("WARNING"):
@@ -304,7 +326,9 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         issuer._auto_respond = False
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: True)
+        phase_issuer = PhaseIssuer(
+            dataset, issuer, publisher, lambda: True, routing_headers=()
+        )
 
         result = phase_issuer.issue(0)
         assert result is None
@@ -315,7 +339,9 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         issuer._auto_respond = False
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(
+            dataset, issuer, publisher, lambda: False, routing_headers=()
+        )
 
         ids = [phase_issuer.issue(i % 5) for i in range(10)]
         assert len(set(ids)) == 10
@@ -325,11 +351,20 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         issuer._auto_respond = False
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+        routing_headers = ("X-Session-ID", "X-SMG-Routing-Key")
+        phase_issuer = PhaseIssuer(
+            dataset,
+            issuer,
+            publisher,
+            lambda: False,
+            routing_headers=routing_headers,
+        )
 
         query_id = phase_issuer.issue(2, conversation_id="conv-1", turn=3)
         assert query_id is not None
-        assert issuer.issued_queries[0].headers == {"X-Session-ID": "conv-1"}
+        assert issuer.issued_queries[0].headers == dict.fromkeys(
+            routing_headers, "conv-1"
+        )
         assert phase_issuer.uuid_to_conv_info[query_id] == ("conv-1", 3)
 
         issued = publisher.events_of_type(SampleEventType.ISSUED)
@@ -343,7 +378,9 @@ class TestPhaseIssuer:
         issuer = FakeIssuer()
         issuer._auto_respond = False
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(
+            dataset, issuer, publisher, lambda: False, routing_headers=()
+        )
 
         qid = phase_issuer.register_skipped(2, conversation_id="c1", turn=4)
 
@@ -371,6 +408,7 @@ class TestPhaseIssuer:
             issuer,
             publisher,
             lambda: False,
+            routing_headers=(),
             on_inflight_drained=lambda: drained.append(True),
         )
 
@@ -382,7 +420,11 @@ class TestPhaseIssuer:
 
     def test_register_skipped_returns_none_when_stopped(self):
         phase_issuer = PhaseIssuer(
-            FakeDataset(5), FakeIssuer(), FakePublisher(), lambda: True
+            FakeDataset(5),
+            FakeIssuer(),
+            FakePublisher(),
+            lambda: True,
+            routing_headers=(),
         )
         assert phase_issuer.register_skipped(0) is None
         assert phase_issuer.issued_count == 0
@@ -837,7 +879,9 @@ class TestBenchmarkSession:
         publisher = FakePublisher()
         session = BenchmarkSession(issuer, publisher, loop)
 
-        phase_issuer = PhaseIssuer(FakeDataset(3), issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(
+            FakeDataset(3), issuer, publisher, lambda: False, routing_headers=()
+        )
         session._current_phase_issuer = phase_issuer
 
         # Streaming path: entry stays available for the terminal COMPLETE pop.
@@ -1233,7 +1277,9 @@ class TestBenchmarkSessionHandleResponse:
         dataset = FakeDataset(1)
         issuer = FakeIssuer()
         publisher = FakePublisher()
-        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(
+            dataset, issuer, publisher, lambda: False, routing_headers=()
+        )
 
         phase_issuer.uuid_to_index["q-late"] = 0
         phase_issuer.completed_uuids.add("q-late")
