@@ -172,8 +172,8 @@ class PhaseIssuer:
         issuer: SampleIssuer,
         publisher: EventPublisher,
         stop_check: Callable[[], bool],
-        routing_headers: tuple[str, ...],
         on_inflight_drained: Callable[[], None] | None = None,
+        routing_headers: tuple[str, ...] = (),
     ):
         self._dataset = dataset
         self._issuer = issuer
