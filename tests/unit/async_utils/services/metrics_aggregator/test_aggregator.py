@@ -342,6 +342,10 @@ class TestTimingMetrics:
                 )
                 # OSL = token_count("hello world") = 2
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 2
+                # E2E interactivity = 2 tokens / 2000 ns = 1,000,000 tokens/s.
+                assert snapshot_series_total(
+                    registry, MetricSeriesKey.E2E_INTERACTIVITY.value
+                ) == pytest.approx(1_000_000.0)
                 assert (
                     snapshot_series_count(registry, MetricSeriesKey.TTFT_NS.value) == 0
                 )

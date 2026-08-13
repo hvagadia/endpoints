@@ -97,9 +97,9 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
     """A registry populated with the metrics ``Report.from_snapshot`` reads.
 
     Only the metrics consumed by ``Report.from_snapshot`` are registered:
-    the tracked counters (issued/completed/failed/duration) and the four
+    the tracked counters (issued/completed/failed/duration) and the five
     series surfaced on the report (ttft_ns, sample_latency_ns, osl,
-    tpot_ns). ISL/chunk_delta_ns are intentionally not registered to
+    tpot_ns, e2e_interactivity). ISL/chunk_delta_ns are intentionally not registered to
     keep the test data minimal — ``Report.from_snapshot`` ignores them.
     """
     registry = MetricsRegistry()
@@ -138,6 +138,15 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
         percentiles=(50.0, 90.0, 99.0),
         dtype=float,
     )
+    registry.register_series(
+        MetricSeriesKey.E2E_INTERACTIVITY.value,
+        hdr_low=1,
+        hdr_high=10_000_000,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        percentiles=(50.0, 90.0, 99.0),
+        dtype=float,
+    )
 
     if n_samples > 0:
         registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value, n_samples)
@@ -149,6 +158,7 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
                 MetricSeriesKey.SAMPLE_LATENCY_NS.value, 5_000_000 + i * 50_000
             )
             registry.record(MetricSeriesKey.OSL.value, 100 + i)
+            registry.record(MetricSeriesKey.E2E_INTERACTIVITY.value, 20.0 + i)
 
     return registry
 
@@ -222,6 +232,15 @@ class TestFromSnapshot:
         assert "histogram" in report.ttft
         assert report.ttft["min"] > 0
         assert report.latency["min"] > 0
+        assert report.e2e_interactivity["avg"] == pytest.approx(44.5)
+        assert "percentiles" in report.e2e_interactivity
+        assert "histogram" in report.e2e_interactivity
+        assert json.loads(report.to_json())["e2e_interactivity"][
+            "avg"
+        ] == pytest.approx(44.5)
+        lines: list[str] = []
+        report.display(fn=lines.append)
+        assert any("E2E interactivity (output tokens/s)" in line for line in lines)
         # No TPOT recordings in the registry → empty dict.
         assert report.tpot == {}
         # OSL data was written → tps is computable.
@@ -458,6 +477,24 @@ class TestReportDisplayAndSerialize:
         data = json.loads(out_path.read_bytes())
         assert data["n_samples_completed"] == 5
 
+    def test_e2e_interactivity_is_required(self):
+        with pytest.raises(TypeError):
+            Report(
+                version="test",
+                git_sha=None,
+                test_started_at=0,
+                n_samples_issued=0,
+                n_samples_completed=0,
+                n_samples_failed=0,
+                duration_ns=None,
+                state="complete",
+                complete=True,
+                ttft={},
+                tpot={},
+                latency={},
+                output_sequence_lengths={},
+            )
+
     def test_display_no_started_at(self):
         """test_started_at=0 should not display a timestamp."""
         report = Report(
@@ -474,6 +511,7 @@ class TestReportDisplayAndSerialize:
             tpot={},
             latency={},
             output_sequence_lengths={},
+            e2e_interactivity={},
         )
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
@@ -496,6 +534,7 @@ class TestReportDisplayAndSerialize:
             tpot={},
             latency={},
             output_sequence_lengths={},
+            e2e_interactivity={},
         )
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
@@ -518,6 +557,7 @@ class TestReportDisplayAndSerialize:
             tpot={},
             latency={},
             output_sequence_lengths={},
+            e2e_interactivity={},
         )
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
