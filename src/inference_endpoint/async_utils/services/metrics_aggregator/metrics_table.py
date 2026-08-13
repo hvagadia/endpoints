@@ -192,7 +192,10 @@ class TokenTrigger(EmitTrigger):
 
     Subclasses return one explicit tokenization input. ``fire()`` dispatches
     already-tokenized IDs synchronously and sends every other variant through
-    the shared ``TokenBatchQueue``.
+    the shared ``TokenBatchQueue``. The queue is ``None`` when no tokenizer was
+    configured or discovered for the run. In that state, pre-tokenized IDs are
+    still counted synchronously, while text and structured token metrics are
+    unavailable and therefore skipped.
     """
 
     def __init__(
@@ -290,7 +293,14 @@ class SampleLatencyTrigger(TimeDeltaTrigger):
 
 
 class IslTrigger(TokenTrigger):
-    """ISL from token IDs, structured chat messages, or plain prompt text."""
+    """ISL from one prompt representation, in explicit priority order.
+
+    ``PromptData`` produced by ``PhaseIssuer`` normally has exactly one populated
+    representation. For defensive handling, token IDs take precedence over
+    plain text, which takes precedence over structured messages. An explicitly
+    empty token-ID tuple is therefore counted as zero rather than falling
+    through to another representation.
+    """
 
     def __init__(
         self,
@@ -312,12 +322,19 @@ class IslTrigger(TokenTrigger):
                 ev_rec.data.tools,
                 ev_rec.data.chat_template_kwargs,
                 ev_rec.data.chat_template,
+                ev_rec.data.tool_choice,
             )
         return None
 
 
 class OslTrigger(TokenTrigger):
-    """OSL = token_count(full output text) from COMPLETE event data."""
+    """OSL from one complete model output representation.
+
+    An output containing reasoning or tool calls uses ``MessageInput`` so the
+    chat template renders all structured fields, including ordinary content.
+    Otherwise, non-empty output content uses ``TextInput``. ``TextModelOutput``
+    does not carry server token IDs, so OSL has no token-ID/text precedence.
+    """
 
     def __init__(
         self,

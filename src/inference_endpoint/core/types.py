@@ -300,6 +300,7 @@ class PromptData(
         tools: Tool declarations accompanying ``messages``.
         chat_template_kwargs: Model-specific arguments used to render ``messages``.
         chat_template: Per-request template used to render ``messages``.
+        tool_choice: Tool-selection mode passed to the chat template.
     """
 
     text: str | None = None
@@ -308,6 +309,7 @@ class PromptData(
     tools: tuple[dict[str, Any], ...] | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     chat_template: str | None = None
+    tool_choice: str | dict[str, Any] | None = None
 
 
 class ErrorData(

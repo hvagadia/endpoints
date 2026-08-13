@@ -272,6 +272,11 @@ class PhaseIssuer:
                         if isinstance(data.get("chat_template"), str)
                         else None
                     ),
+                    tool_choice=(
+                        data["tool_choice"]
+                        if isinstance(data.get("tool_choice"), str | dict)
+                        else None
+                    ),
                 )
             elif isinstance(prompt, str):
                 prompt_data = PromptData(text=prompt)

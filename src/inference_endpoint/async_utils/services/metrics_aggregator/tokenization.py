@@ -45,6 +45,7 @@ class PromptInput:
     tools: tuple[dict[str, Any], ...] | None
     chat_template_kwargs: dict[str, Any] | None
     chat_template: str | None
+    tool_choice: str | dict[str, Any] | None = None
 
 
 TokenizationInput: TypeAlias = (  # noqa: UP040 - mypy version lacks PEP 695.

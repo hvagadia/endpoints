@@ -280,6 +280,7 @@ class BatchTokenizer:
     # -- setup --------------------------------------------------------------
 
     def _load_tokenizer(self) -> None:
+        transformers_logging.set_verbosity_error()
         tok = load_reference_tokenizer(self._tokenizer_name)
         self._tokenizer = tok
         self._text_backend = getattr(tok, "backend_tokenizer", None)
@@ -440,12 +441,33 @@ class BatchTokenizer:
     def _token_count_text(self, text: str) -> int:
         return len(self._tokenizer.tokenize(text))  # type: ignore[union-attr]
 
+    def _warn_template_fallback(self, exc: Exception, impact: str) -> None:
+        """Log a chat-template fallback once per tokenizer and error type."""
+        key = f"{self._tokenizer_name}:{type(exc).__name__}"
+        if key in self._fallback_warned:
+            return
+        self._fallback_warned.add(key)
+        logger.exception(
+            "apply_chat_template failed for %s (%s); falling back to "
+            "whitespace tokenization. %s",
+            self._tokenizer_name,
+            type(exc).__name__,
+            impact,
+        )
+
     def _token_count_message(
         self,
         content: str,
         reasoning: str | None,
         tool_calls: tuple[dict[str, Any], ...] | None,
     ) -> int:
+        """Count one assistant output without surrounding chat-template framing.
+
+        Render the structured assistant content, reasoning, and tool calls with
+        a minimal user prefix, then subtract both that prefix and the empty
+        assistant frame. The result is the assistant payload count used for
+        OSL and TPOT.
+        """
         tok = self._tokenizer
         msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
         if reasoning:
@@ -461,15 +483,7 @@ class BatchTokenizer:
             )
             return max(0, len(encoded) - self._prefix_len - self._baseline)
         except Exception as exc:
-            key = f"{self._tokenizer_name}:{type(exc).__name__}"
-            if key not in self._fallback_warned:
-                self._fallback_warned.add(key)
-                logger.exception(
-                    "apply_chat_template failed for %s (%s); falling back to "
-                    "whitespace tokenization. Tool-call OSL/TPOT may diverge.",
-                    self._tokenizer_name,
-                    type(exc).__name__,
-                )
+            self._warn_template_fallback(exc, "Tool-call OSL/TPOT may diverge.")
             tool_calls_json = (
                 msgspec.json.encode(list(tool_calls)).decode() if tool_calls else None
             )
@@ -482,9 +496,17 @@ class BatchTokenizer:
         self,
         messages: tuple[dict[str, Any], ...],
         tools: tuple[dict[str, Any], ...] | None,
-        chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template: str | None = None,
+        chat_template_kwargs: dict[str, Any] | None,
+        chat_template: str | None,
+        tool_choice: str | dict[str, Any] | None,
     ) -> int:
+        """Count a complete structured input prompt for ISL.
+
+        Render the full message history and optional tools using the selected
+        chat template and model-specific keyword arguments. Unlike assistant
+        output counting, this keeps all conversation framing and appends the
+        generation prompt because those tokens are part of the server input.
+        """
         kwargs = dict(chat_template_kwargs or {})
         kwargs.update(
             tokenize=True,
@@ -495,6 +517,8 @@ class BatchTokenizer:
             kwargs["tools"] = list(tools)
         if chat_template is not None:
             kwargs["chat_template"] = chat_template
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         prompt_messages = _normalize_prompt_messages_for_template(messages)
         try:
             encoded = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
@@ -502,19 +526,37 @@ class BatchTokenizer:
             )
             return len(encoded)
         except Exception as exc:
-            key = f"{self._tokenizer_name}:{type(exc).__name__}"
-            if key not in self._fallback_warned:
-                self._fallback_warned.add(key)
-                logger.exception(
-                    "apply_chat_template failed for %s (%s); falling back to "
-                    "whitespace tokenization. Structured ISL may diverge.",
-                    self._tokenizer_name,
-                    type(exc).__name__,
-                )
+            self._warn_template_fallback(exc, "Structured ISL may diverge.")
             prompt = {"messages": prompt_messages}
             if tools is not None:
                 prompt["tools"] = list(tools)
             return self._token_count_text(msgspec.json.encode(prompt).decode())
+
+    async def _count_indexed_texts_async(
+        self,
+        indexed_texts: list[tuple[int, str]],
+        loop: asyncio.AbstractEventLoop,
+        *,
+        live: bool,
+    ) -> list[tuple[int, int | Exception]]:
+        """Count one text batch and pair each outcome with its input index."""
+        texts = [text for _, text in indexed_texts]
+        try:
+            counts = await self._count_texts_async(texts, loop, live=live)
+        except Exception as exc:  # noqa: BLE001 - isolate this input kind.
+            return [(index, exc) for index, _ in indexed_texts]
+
+        if len(counts) != len(indexed_texts):
+            length_error = RuntimeError(
+                f"tokenizer returned {len(counts)} counts for "
+                f"{len(indexed_texts)} texts"
+            )
+            return [(index, length_error) for index, _ in indexed_texts]
+
+        return [
+            (index, count)
+            for (index, _), count in zip(indexed_texts, counts, strict=True)
+        ]
 
     async def count_batch_async(
         self,
@@ -526,57 +568,55 @@ class BatchTokenizer:
     ) -> list[int | Exception]:
         """Count a mixed batch while preserving input order."""
         outcomes: list[int | Exception | None] = [None] * len(inputs)
-        text_indices: list[int] = []
-        texts: list[str] = []
+        indexed_texts: list[tuple[int, str]] = []
         structured: list[tuple[int, MessageInput | PromptInput]] = []
 
         for index, item in enumerate(inputs):
-            if isinstance(item, TokenIdsInput):
-                outcomes[index] = len(item.token_ids)
-            elif isinstance(item, TextInput):
-                text_indices.append(index)
-                texts.append(item.text)
-            elif isinstance(item, MessageInput):
-                structured.append((index, item))
-            elif isinstance(item, PromptInput):
-                structured.append((index, item))
+            match item:
+                case TokenIdsInput(token_ids=token_ids):
+                    outcomes[index] = len(token_ids)
+                case TextInput(text=text):
+                    indexed_texts.append((index, text))
+                case MessageInput() | PromptInput():
+                    structured.append((index, item))
 
-        if texts:
-            try:
-                counts = await self._count_texts_async(texts, loop, live=live)
-                if len(counts) != len(texts):
-                    raise RuntimeError(
-                        f"tokenizer returned {len(counts)} counts for "
-                        f"{len(texts)} texts"
-                    )
-                for index, count in zip(text_indices, counts, strict=True):
-                    outcomes[index] = count
-            except Exception as exc:  # noqa: BLE001 - isolate this input kind.
-                for index in text_indices:
-                    outcomes[index] = exc
+        if indexed_texts:
+            text_outcomes = await self._count_indexed_texts_async(
+                indexed_texts, loop, live=live
+            )
+            for index, outcome in text_outcomes:
+                outcomes[index] = outcome
 
         for index, item in structured:
             if self._thread is None:
                 outcomes[index] = RuntimeError("BatchTokenizer is closed")
                 continue
             try:
-                if isinstance(item, MessageInput):
-                    outcomes[index] = await loop.run_in_executor(
-                        self._thread,
-                        self._token_count_message,
-                        item.content,
-                        item.reasoning,
-                        item.tool_calls,
-                    )
-                elif isinstance(item, PromptInput):
-                    outcomes[index] = await loop.run_in_executor(
-                        self._thread,
-                        self._token_count_prompt,
-                        item.messages,
-                        item.tools,
-                        item.chat_template_kwargs,
-                        item.chat_template,
-                    )
+                match item:
+                    case MessageInput(content, reasoning, tool_calls):
+                        outcomes[index] = await loop.run_in_executor(
+                            self._thread,
+                            self._token_count_message,
+                            content,
+                            reasoning,
+                            tool_calls,
+                        )
+                    case PromptInput(
+                        messages,
+                        tools,
+                        chat_template_kwargs,
+                        chat_template,
+                        tool_choice,
+                    ):
+                        outcomes[index] = await loop.run_in_executor(
+                            self._thread,
+                            self._token_count_prompt,
+                            messages,
+                            tools,
+                            chat_template_kwargs,
+                            chat_template,
+                            tool_choice,
+                        )
             except Exception as exc:  # noqa: BLE001 - isolate this input.
                 outcomes[index] = exc
 

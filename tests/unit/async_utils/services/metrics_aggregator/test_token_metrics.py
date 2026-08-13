@@ -208,7 +208,11 @@ class TestBatchTokenizerMessageTokenization:
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 count = tok._token_count_prompt(
-                    ({"role": "user", "content": "one two three four"},), None
+                    ({"role": "user", "content": "one two three four"},),
+                    None,
+                    None,
+                    None,
+                    None,
                 )
 
                 assert count == 7
@@ -339,6 +343,9 @@ class TestBatchTokenizerMessageTokenization:
                         },
                     ),
                     None,
+                    None,
+                    None,
+                    None,
                 )
 
                 assert count > 0
@@ -376,6 +383,7 @@ class TestBatchTokenizerMessageTokenization:
                     None,
                     {"enable_thinking": False},
                     "custom template",
+                    "auto",
                 )
 
         normalized_call = _RecordingTokenizer.last_messages[0]["tool_calls"][0]
@@ -385,6 +393,7 @@ class TestBatchTokenizerMessageTokenization:
         )
         assert _RecordingTokenizer.last_kwargs["enable_thinking"] is False
         assert _RecordingTokenizer.last_kwargs["chat_template"] == "custom template"
+        assert _RecordingTokenizer.last_kwargs["tool_choice"] == "auto"
         assert _RecordingTokenizer.last_kwargs["return_dict"] is False
 
 
@@ -545,7 +554,11 @@ class TestSetupShardsDecisions:
                 assert tok._procs == []
                 assert (
                     tok._token_count_prompt(
-                        ({"role": "user", "content": "one two"},), None
+                        ({"role": "user", "content": "one two"},),
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                     == 5
                 )

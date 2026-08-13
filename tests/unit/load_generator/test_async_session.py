@@ -197,6 +197,7 @@ class TestPhaseIssuer:
                     ],
                     "chat_template": "custom template",
                     "chat_template_kwargs": {"enable_thinking": False},
+                    "tool_choice": "auto",
                 }
 
         issuer = FakeIssuer()
@@ -211,6 +212,7 @@ class TestPhaseIssuer:
         assert prompt.tools == tuple(issuer.issued_queries[0].data["tools"])
         assert prompt.chat_template == "custom template"
         assert prompt.chat_template_kwargs == {"enable_thinking": False}
+        assert prompt.tool_choice == "auto"
         assert prompt.text is None
 
     def test_issue_messages_take_precedence_over_prompt(self):

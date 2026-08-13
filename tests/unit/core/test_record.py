@@ -184,6 +184,7 @@ class TestEventRecordRoundTrip:
         tools = ({"function": {"name": "lookup"}},)
         chat_template_kwargs = {"enable_thinking": False}
         chat_template = "custom template"
+        tool_choice = "auto"
         record = EventRecord(
             event_type=SampleEventType.ISSUED,
             sample_uuid="sample-chat",
@@ -192,6 +193,7 @@ class TestEventRecordRoundTrip:
                 tools=tools,
                 chat_template_kwargs=chat_template_kwargs,
                 chat_template=chat_template,
+                tool_choice=tool_choice,
             ),
         )
 
@@ -203,6 +205,7 @@ class TestEventRecordRoundTrip:
         assert decoded.data.tools == tools
         assert decoded.data.chat_template_kwargs == chat_template_kwargs
         assert decoded.data.chat_template == chat_template
+        assert decoded.data.tool_choice == tool_choice
 
     def test_error_event_round_trips_with_error_data(self):
         record = EventRecord(
