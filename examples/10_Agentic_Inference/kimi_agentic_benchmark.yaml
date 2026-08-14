@@ -44,7 +44,7 @@ settings:
 
   load_pattern:
     type: agentic_inference
-    target_concurrency: 64
+    target_concurrency: 8 # Submission-specific concurrency.
 
   client:
     num_workers: 4
