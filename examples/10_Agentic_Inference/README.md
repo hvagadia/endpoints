@@ -189,9 +189,9 @@ Every submitted Pareto point must satisfy all of the following accuracy threshol
 
 | Metric             |          Kimi K3 |  Qwen3.6-35B-A3B |
 | ------------------ | ---------------: | ---------------: |
-| Inline accuracy    |      `>= 63.08%` |      `>= 55.86%` |
-| OSL per-turn mean  | `404-494` tokens | `355-434` tokens |
-| SWE-bench accuracy |       `>= 76.5%` |         `>= 69%` |
+| Inline accuracy    |      `>= 58.32%` |      `>= 55.86%` |
+| OSL per-turn mean  | `390-475` tokens | `355-434` tokens |
+| SWE-bench accuracy |       `>= 93.5%` |         `>= 69%` |
 
 ### Speculative Decoding
 
