@@ -47,11 +47,8 @@ settings:
     target_concurrency: 8 # Submission-specific concurrency.
 
   client:
-    num_workers: 4
     warmup_connections: 0
-    max_connections: -1
     max_idle_time: 0.5
-    worker_initialization_timeout: 600.0
 
 endpoint_config:
   endpoints:
