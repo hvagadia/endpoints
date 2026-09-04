@@ -135,6 +135,24 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
   --auth-token "$SWEBENCH_SERVICE_AUTH_TOKEN"
 ```
 
+#### Build ARM64 SWE-bench Images
+
+[`build_and_push.py`](build_and_push.py) builds and pushes the native ARM64 images for the first 200 pinned SWE-bench Verified tasks. The script validates the task list, applies the required ARM compatibility fixes, and skips images that already exist in the destination registry.
+
+Run it on a native ARM64 machine with Docker after logging in to a registry where you have push access:
+
+```bash
+python3 -m venv /tmp/swebench-arm64-venv
+/tmp/swebench-arm64-venv/bin/pip install "swebench==4.1.0"
+docker login registry.example.com
+
+REGISTRY=registry.example.com/group/project \
+  /tmp/swebench-arm64-venv/bin/python \
+  examples/10_Agentic_Inference/build_and_push.py
+```
+
+Set `WORKERS` to change the default build and push concurrency of `16`. Images are tagged `v4.1.0-arm64`, and interrupted runs can be resumed with the same command.
+
 ## Run The Client
 
 Update the first `datasets` entry (`name` and `path`), `model_params.name`, and `endpoint_config.endpoints` as needed. Then select the matching model config and run it from the repo root:
