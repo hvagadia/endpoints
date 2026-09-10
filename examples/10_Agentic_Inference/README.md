@@ -247,11 +247,13 @@ Qwen3.6-35B-A3B submissions must set `accuracy_config.extras.swebench_template: 
 
 Every Kimi K3 and Qwen3.6-35B-A3B submitted Pareto point must satisfy all of the model-specific accuracy thresholds below. For these models, SWE-bench accuracy is evaluated using mean-of-N: average one SWE-bench accuracy result from each of the [four mandatory regions](https://github.com/mlcommons/endpoints_policies/blob/main/endpoints_rules.md#54-regions-of-interest) (`N = 4`), then compare that mean with the model-specific SWE-bench threshold below. The DSV4 accuracy thresholds and SWE-bench evaluation policy are TBD.
 
-| Metric             |          Kimi K3 |  Qwen3.6-35B-A3B | DSV4 |
-| ------------------ | ---------------: | ---------------: | ---: |
-| Inline accuracy    |      `>= 58.32%` |      `>= 55.86%` |  TBD |
-| OSL per-turn mean  | `390-475` tokens | `355-434` tokens |  TBD |
-| SWE-bench accuracy |       `>= 93.5%` |         `>= 69%` |  TBD |
+Reference mean values are shown in parentheses.
+
+| Metric             |               Kimi K3 |        Qwen3.6-35B-A3B | DSV4 |
+| ------------------ | --------------------: | ---------------------: | ---: |
+| Inline accuracy    | `>= 58.32%` (`58.9%`) | `>= 55.86%` (`56.43%`) |  TBD |
+| OSL per-turn mean  |      `390-475` tokens |       `355-434` tokens |  TBD |
+| SWE-bench accuracy | `>= 93.5%` (`94.83%`) |     `>= 69%` (`71.7%`) |  TBD |
 
 ### Approved Checkpoints and Speculative-Decoding Heads
 
