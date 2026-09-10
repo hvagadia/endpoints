@@ -153,6 +153,19 @@ REGISTRY=registry.example.com/group/project \
 
 Set `WORKERS` to change the default build and push concurrency of `16`. Images are tagged `v4.1.0-arm64`, and interrupted runs can be resumed with the same command.
 
+##### ARM64 Compatibility and x86 Comparability
+
+The builder keeps the benchmark workload fixed by pinning the SWE-bench Verified dataset revision and validating the ordered first 200 instance IDs. It does not change the dataset rows, repository or test patches, evaluation commands, or set of tests. The generated images are nevertheless architecture-specific compatibility builds: `arm_compat` adjusts only the environment and repository setup commands needed to build and run the same instances on ARM64.
+
+The compatibility adjustments are:
+
+- Replace legacy Python 3.5 environment requests with Python 3.6, and install `setuptools==38.2.4` with pip after activating the environment when that exact legacy setup command is present.
+- Preinstall `jinja2==3.1.6` and `cython==0.29.36`, then disable build isolation for the matching editable test-dependency installation.
+- Pin `django__django-15103` to Python 3.9.20.
+- For `django__django-10097`, replay the recorded x86 `/testbed/tests` directory enumeration order. The old Django runner consumes unsorted directory entries and leaks test state through `generic_inline_admin`; ARM64 exposes a different filesystem order. Tests absent from the recorded order are appended, so this changes only discovery order, not the test set.
+
+These substitutions intentionally preserve the benchmark instances and evaluation logic, but the resulting software environment is not byte-for-byte identical to the x86 image. The script rebuilds the two instance-specific compatibility images on every run and verifies that every image is ARM64 before pushing it.
+
 ## Run The Client
 
 Update the first `datasets` entry (`name` and `path`), `model_params.name`, and `endpoint_config.endpoints` as needed. Then select the matching model config and run it from the repo root:
@@ -248,20 +261,20 @@ Under the MLPerf Endpoint Benchmark rules, submitters must use only the approved
 
 Approved model checkpoints:
 
-- [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3)
-- [nvidia/Kimi-K3-NVFP4](https://huggingface.co/nvidia/Kimi-K3-NVFP4)
+- [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3/tree/f831ab66814297da540d832a5235f8e904f29d06) (`f831ab66814297da540d832a5235f8e904f29d06`)
+- [nvidia/Kimi-K3-NVFP4](https://huggingface.co/nvidia/Kimi-K3-NVFP4/tree/b2428a0b83a8b712ff2e1a8448a103d4175341f1) (`b2428a0b83a8b712ff2e1a8448a103d4175341f1`)
 
 Approved speculative-decoding heads:
 
-- [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark)
-- [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark)
+- [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark/tree/3c5bac301d9cf392706189d82ed947feca6c2f0f) (`3c5bac301d9cf392706189d82ed947feca6c2f0f`)
+- [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark/tree/cf6b8244620e7ea4b0651d214f28e89eac75bed6) (`cf6b8244620e7ea4b0651d214f28e89eac75bed6`)
 
 #### DSV4
 
 Approved model checkpoints:
 
-- [deepseek-ai/DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813)
-- [nvidia/DeepSeek-V4-Pro-0813-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4-Pro-0813-NVFP4)
+- [deepseek-ai/DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/tree/72e1d3230f6c080a530b0a1d46f8eb4602340597) (`72e1d3230f6c080a530b0a1d46f8eb4602340597`)
+- [nvidia/DeepSeek-V4-Pro-0813-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4-Pro-0813-NVFP4/tree/949138637e8e8fe190335be2396af62187dc8a83) (`949138637e8e8fe190335be2396af62187dc8a83`)
 
 Both approved DSV4 checkpoints include bundled DSpark speculative-decoding heads.
 
@@ -269,7 +282,8 @@ Both approved DSV4 checkpoints include bundled DSpark speculative-decoding heads
 
 Approved model checkpoints:
 
-- [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
-- [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) (contains both W4A16 and W4A4 scales)
+- [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/tree/995ad96eacd98c81ed38be0c5b274b04031597b0) (`995ad96eacd98c81ed38be0c5b274b04031597b0`)
+- [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/tree/95a723d08a9490559dae23d0cff1d9466213d989) (`95a723d08a9490559dae23d0cff1d9466213d989`)
+- [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4/tree/1355db6a052410cfd62085d94b58866fd0f2c3c5) (`1355db6a052410cfd62085d94b58866fd0f2c3c5`; contains both W4A16 and W4A4 scales)
 
-Both approved Qwen checkpoints include their native MTP speculative-decoding heads.
+The approved Qwen checkpoints include their native MTP speculative-decoding heads.
