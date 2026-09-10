@@ -263,6 +263,25 @@ class TestFromSnapshot:
         # OSL data was written → tps is computable.
         assert report.tps is not None
 
+    def test_e2e_avg_interactivity_is_unavailable_with_failed_requests(self):
+        """Do not divide successful-output tokens by mixed-success latency."""
+        registry = _make_registry(n_samples=0)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value, 2)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value, 2)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_FAILED.value)
+        registry.set_counter(MetricCounterKey.TRACKED_DURATION_NS.value, 10_000_000_000)
+        # Both terminal requests contribute latency, but only the successful
+        # response contributes output tokens.
+        registry.record(MetricSeriesKey.SAMPLE_LATENCY_NS.value, 1_000_000_000)
+        registry.record(MetricSeriesKey.SAMPLE_LATENCY_NS.value, 9_000_000_000)
+        registry.record(MetricSeriesKey.OSL.value, 100)
+
+        report = _build_report(registry, use_legacy_loadgen_qps_metrics=False)
+
+        assert report.latency["total"] == 10_000_000_000
+        assert report.output_sequence_lengths["total"] == 100
+        assert report.e2e_avg_interactivity is None
+
     def test_run_config_keyword_only_passthrough(self):
         """run_config is config, not a snapshot metric: None unless the caller
         supplies it, and carried verbatim into the report when it does."""
